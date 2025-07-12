@@ -50,8 +50,8 @@
     "@ory/integrations": "1.1.4",
     "@popperjs/core": "2.11.8",
     "@react-sigma/core": "4.0.3",
-    "@sentry/nextjs": "9.35.0",
-    "@sentry/react": "9.35.0",
+    "@sentry/nextjs": "9.38.0",
+    "@sentry/react": "9.38.0",
     "@sentry/webpack-plugin": "3.5.0",
     "@sigma/edge-curve": "patch:@sigma/edge-curve@npm%3A3.0.0-beta.16#~/.yarn/patches/@sigma-edge-curve-npm-3.0.0-beta.16-3d8b985284.patch",
     "@sigma/node-border": "3.0.0",
@@ -152,6 +152,6 @@
     "sass": "1.89.2",
     "typescript": "5.7.3",
     "wait-on": "8.0.3",
-    "webpack": "5.99.9"
+    "webpack": "5.100.1"
   }
 }

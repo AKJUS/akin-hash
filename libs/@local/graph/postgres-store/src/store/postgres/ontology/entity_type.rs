@@ -644,6 +644,7 @@ where
                         )
                         .await?,
                         provider,
+                        subgraph.temporal_axes.resolved.clone(),
                     )
                     .await?
                     .flat_map(|edge| {
@@ -1288,9 +1289,23 @@ where
         actor_id: ActorEntityUuid,
         mut params: GetEntityTypeSubgraphParams<'_>,
     ) -> Result<GetEntityTypeSubgraphResponse, Report<QueryError>> {
+        let mut actions = vec![ActionName::ViewEntityType];
+        if params
+            .graph_resolve_depths
+            .constrains_properties_on
+            .outgoing
+            > 0
+        {
+            actions.push(ActionName::ViewPropertyType);
+
+            if params.graph_resolve_depths.constrains_values_on.outgoing > 0 {
+                actions.push(ActionName::ViewDataType);
+            }
+        }
+
         let policy_components = PolicyComponents::builder(self)
             .with_actor(actor_id)
-            .with_action(ActionName::ViewEntityType, true)
+            .with_actions(actions, true)
             .await
             .change_context(QueryError)?;
 

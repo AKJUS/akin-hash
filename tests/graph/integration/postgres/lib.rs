@@ -57,8 +57,8 @@ use hash_graph_store::{
         ArchiveDataTypeParams, CountDataTypesParams, CreateDataTypeParams, DataTypeStore,
         GetDataTypeConversionTargetsParams, GetDataTypeConversionTargetsResponse,
         GetDataTypeSubgraphParams, GetDataTypeSubgraphResponse, GetDataTypesParams,
-        GetDataTypesResponse, UnarchiveDataTypeParams, UpdateDataTypeEmbeddingParams,
-        UpdateDataTypesParams,
+        GetDataTypesResponse, HasPermissionForDataTypesParams, UnarchiveDataTypeParams,
+        UpdateDataTypeEmbeddingParams, UpdateDataTypesParams,
     },
     entity::{
         CountEntitiesParams, CreateEntityParams, EntityStore, EntityValidationReport,
@@ -78,8 +78,8 @@ use hash_graph_store::{
     property_type::{
         ArchivePropertyTypeParams, CountPropertyTypesParams, CreatePropertyTypeParams,
         GetPropertyTypeSubgraphParams, GetPropertyTypeSubgraphResponse, GetPropertyTypesParams,
-        GetPropertyTypesResponse, PropertyTypeStore, UnarchivePropertyTypeParams,
-        UpdatePropertyTypeEmbeddingParams, UpdatePropertyTypesParams,
+        GetPropertyTypesResponse, HasPermissionForPropertyTypesParams, PropertyTypeStore,
+        UnarchivePropertyTypeParams, UpdatePropertyTypeEmbeddingParams, UpdatePropertyTypesParams,
     },
     query::ConflictBehavior,
     subgraph::temporal_axes::QueryTemporalAxesUnresolved,
@@ -463,6 +463,16 @@ impl<A: AuthorizationApi> DataTypeStore for DatabaseApi<'_, A> {
     async fn reindex_data_type_cache(&mut self) -> Result<(), Report<UpdateError>> {
         self.store.reindex_entity_type_cache().await
     }
+
+    async fn has_permission_for_data_types(
+        &self,
+        authenticated_actor: AuthenticatedActor,
+        params: HasPermissionForDataTypesParams<'_>,
+    ) -> Result<HashSet<VersionedUrl>, Report<CheckPermissionError>> {
+        self.store
+            .has_permission_for_data_types(authenticated_actor, params)
+            .await
+    }
 }
 
 impl<A: AuthorizationApi> PropertyTypeStore for DatabaseApi<'_, A> {
@@ -597,6 +607,16 @@ impl<A: AuthorizationApi> PropertyTypeStore for DatabaseApi<'_, A> {
     ) -> Result<(), Report<UpdateError>> {
         self.store
             .update_property_type_embeddings(actor_id, params)
+            .await
+    }
+
+    async fn has_permission_for_property_types(
+        &self,
+        authenticated_actor: AuthenticatedActor,
+        params: HasPermissionForPropertyTypesParams<'_>,
+    ) -> Result<HashSet<VersionedUrl>, Report<CheckPermissionError>> {
+        self.store
+            .has_permission_for_property_types(authenticated_actor, params)
             .await
     }
 }

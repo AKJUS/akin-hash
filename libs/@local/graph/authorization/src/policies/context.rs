@@ -12,7 +12,7 @@ use super::{
     PolicyValidator,
     cedar::ToCedarEntity as _,
     principal::actor::PublicActor,
-    resource::{EntityResource, EntityTypeResource},
+    resource::{DataTypeResource, EntityResource, EntityTypeResource, PropertyTypeResource},
 };
 
 #[derive(Debug, derive_more::Display, derive_more::Error)]
@@ -83,6 +83,14 @@ impl ContextBuilder {
 
     pub fn add_entity_type(&mut self, entity_type: &EntityTypeResource) {
         self.entities.push(entity_type.to_cedar_entity());
+    }
+
+    pub fn add_property_type(&mut self, property_type: &PropertyTypeResource) {
+        self.entities.push(property_type.to_cedar_entity());
+    }
+
+    pub fn add_data_type(&mut self, data_type: &DataTypeResource) {
+        self.entities.push(data_type.to_cedar_entity());
     }
 
     /// Builds the context.

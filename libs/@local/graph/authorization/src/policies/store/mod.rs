@@ -20,17 +20,21 @@ use type_system::{
 use uuid::Uuid;
 
 use self::error::{
-    ActorCreationError, BuildEntityContextError, BuildEntityTypeContextError,
-    BuildPrincipalContextError, ContextCreationError, CreatePolicyError, DetermineActorError,
-    EnsureSystemPoliciesError, GetPoliciesError, GetSystemAccountError, PolicyStoreError,
-    RemovePolicyError, RoleAssignmentError, TeamCreationError, TeamRoleCreationError,
-    TeamRoleError, UpdatePolicyError, WebCreationError, WebRoleCreationError, WebRoleError,
+    ActorCreationError, BuildDataTypeContextError, BuildEntityContextError,
+    BuildEntityTypeContextError, BuildPrincipalContextError, BuildPropertyTypeContextError,
+    ContextCreationError, CreatePolicyError, DetermineActorError, EnsureSystemPoliciesError,
+    GetPoliciesError, GetSystemAccountError, PolicyStoreError, RemovePolicyError,
+    RoleAssignmentError, TeamCreationError, TeamRoleCreationError, TeamRoleError,
+    UpdatePolicyError, WebCreationError, WebRoleCreationError, WebRoleError,
 };
 use super::{
     ContextBuilder, Effect, Policy, PolicyId,
     action::ActionName,
     principal::{PrincipalConstraint, actor::AuthenticatedActor},
-    resource::{EntityResource, EntityTypeResource, ResourceConstraint},
+    resource::{
+        DataTypeResource, EntityResource, EntityTypeResource, PropertyTypeResource,
+        ResourceConstraint,
+    },
 };
 
 #[derive(Debug, derive_more::Display)]
@@ -344,6 +348,29 @@ pub trait PolicyStore {
         Output = Result<Vec<EntityTypeResource<'_>>, Report<[BuildEntityTypeContextError]>>,
     > + Send;
 
+    /// Builds a context used to evaluate policies for a set of property types.
+    ///
+    /// # Errors
+    ///
+    /// - If a database error occurs
+    fn build_property_type_context(
+        &self,
+        property_type_ids: &[&VersionedUrl],
+    ) -> impl Future<
+        Output = Result<Vec<PropertyTypeResource<'_>>, Report<[BuildPropertyTypeContextError]>>,
+    > + Send;
+
+    /// Builds a context used to evaluate policies for a set of data types.
+    ///
+    /// # Errors
+    ///
+    /// - If a database error occurs
+    fn build_data_type_context(
+        &self,
+        data_type_ids: &[&VersionedUrl],
+    ) -> impl Future<Output = Result<Vec<DataTypeResource<'_>>, Report<[BuildDataTypeContextError]>>>
+    + Send;
+
     /// Builds a context used to evaluate policies for a set of entities.
     ///
     /// # Errors
@@ -452,7 +479,7 @@ pub trait PrincipalStore {
     /// [`ActorNotFound`]: RoleAssignmentError::ActorNotFound
     /// [`RoleNotFound`]: RoleAssignmentError::RoleNotFound
     /// [`StoreError`]: RoleAssignmentError::StoreError
-    async fn is_assigned(
+    async fn get_actor_group_role(
         &mut self,
         actor_id: ActorEntityUuid,
         actor_group_id: ActorGroupEntityUuid,

@@ -1,5 +1,7 @@
+mod data_type;
 mod entity;
 mod entity_type;
+mod property_type;
 
 use alloc::sync::Arc;
 use core::{error::Error, str::FromStr as _};
@@ -12,10 +14,18 @@ use type_system::{
 use uuid::Uuid;
 
 pub use self::{
+    data_type::{
+        DataTypeId, DataTypeResource, DataTypeResourceConstraint, DataTypeResourceConstraints,
+        DataTypeResourceFilter,
+    },
     entity::{EntityResource, EntityResourceConstraint, EntityResourceFilter},
     entity_type::{
         EntityTypeId, EntityTypeResource, EntityTypeResourceConstraint,
         EntityTypeResourceConstraints, EntityTypeResourceFilter,
+    },
+    property_type::{
+        PropertyTypeId, PropertyTypeResource, PropertyTypeResourceConstraint,
+        PropertyTypeResourceConstraints, PropertyTypeResourceFilter,
     },
 };
 use super::cedar::{FromCedarExpr as _, ToCedarEntityId as _};
@@ -31,6 +41,8 @@ pub enum ResourceConstraint {
     },
     Entity(EntityResourceConstraint),
     EntityType(EntityTypeResourceConstraint),
+    PropertyType(PropertyTypeResourceConstraint),
+    DataType(DataTypeResourceConstraint),
 }
 
 #[derive(Debug, derive_more::Display, derive_more::Error)]
@@ -62,6 +74,8 @@ impl ResourceConstraint {
             ),
             Self::Entity(entity) => entity.to_cedar_resource_constraint(),
             Self::EntityType(entity_type) => entity_type.to_cedar(),
+            Self::PropertyType(property_type) => property_type.to_cedar(),
+            Self::DataType(data_type) => data_type.to_cedar(),
         }
     }
 
@@ -109,6 +123,20 @@ impl ResourceConstraint {
         } else if *resource.entity_type() == **EntityTypeId::entity_type() {
             Ok(Self::EntityType(EntityTypeResourceConstraint::Exact {
                 id: EntityTypeId::new(
+                    VersionedUrl::from_str(resource.eid().as_ref())
+                        .change_context(InvalidResourceConstraint::InvalidPrincipalId)?,
+                ),
+            }))
+        } else if *resource.entity_type() == **PropertyTypeId::entity_type() {
+            Ok(Self::PropertyType(PropertyTypeResourceConstraint::Exact {
+                id: PropertyTypeId::new(
+                    VersionedUrl::from_str(resource.eid().as_ref())
+                        .change_context(InvalidResourceConstraint::InvalidPrincipalId)?,
+                ),
+            }))
+        } else if *resource.entity_type() == **DataTypeId::entity_type() {
+            Ok(Self::DataType(DataTypeResourceConstraint::Exact {
+                id: DataTypeId::new(
                     VersionedUrl::from_str(resource.eid().as_ref())
                         .change_context(InvalidResourceConstraint::InvalidPrincipalId)?,
                 ),
@@ -175,6 +203,50 @@ impl ResourceConstraint {
 
             if *in_resource.entity_type() == **WebId::entity_type() {
                 Ok(Self::EntityType(EntityTypeResourceConstraint::Web {
+                    web_id: WebId::new(
+                        Uuid::from_str(in_resource.eid().as_ref())
+                            .change_context(InvalidResourceConstraint::InvalidPrincipalId)?,
+                    ),
+                    filter,
+                }))
+            } else {
+                bail!(InvalidResourceConstraint::UnexpectedEntityType(
+                    in_resource.entity_type().clone()
+                ))
+            }
+        } else if *resource_type == **PropertyTypeId::entity_type() {
+            let filter = PropertyTypeResourceFilter::from_cedar(condition)
+                .change_context(InvalidResourceConstraint::InvalidResourceFilter)?;
+
+            let Some(in_resource) = in_resource else {
+                return Ok(Self::PropertyType(PropertyTypeResourceConstraint::Any {
+                    filter,
+                }));
+            };
+
+            if *in_resource.entity_type() == **WebId::entity_type() {
+                Ok(Self::PropertyType(PropertyTypeResourceConstraint::Web {
+                    web_id: WebId::new(
+                        Uuid::from_str(in_resource.eid().as_ref())
+                            .change_context(InvalidResourceConstraint::InvalidPrincipalId)?,
+                    ),
+                    filter,
+                }))
+            } else {
+                bail!(InvalidResourceConstraint::UnexpectedEntityType(
+                    in_resource.entity_type().clone()
+                ))
+            }
+        } else if *resource_type == **DataTypeId::entity_type() {
+            let filter = DataTypeResourceFilter::from_cedar(condition)
+                .change_context(InvalidResourceConstraint::InvalidResourceFilter)?;
+
+            let Some(in_resource) = in_resource else {
+                return Ok(Self::DataType(DataTypeResourceConstraint::Any { filter }));
+            };
+
+            if *in_resource.entity_type() == **WebId::entity_type() {
+                Ok(Self::DataType(DataTypeResourceConstraint::Web {
                     web_id: WebId::new(
                         Uuid::from_str(in_resource.eid().as_ref())
                             .change_context(InvalidResourceConstraint::InvalidPrincipalId)?,
