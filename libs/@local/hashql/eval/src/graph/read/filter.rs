@@ -4,7 +4,7 @@ use hash_graph_store::filter::{Filter, FilterExpression, Parameter, QueryRecord}
 use hashql_hir::node::{
     Node,
     kind::NodeKind,
-    r#let::Let,
+    r#let::{Binding, Let},
     operation::{
         BinaryOperation, Operation, OperationKind, TypeOperation,
         binary::BinOpKind,
@@ -24,7 +24,7 @@ impl<'env, 'heap: 'env> GraphReadCompiler<'env, 'heap> {
     #[expect(clippy::too_many_lines, reason = "match statement")]
     pub(super) fn compile_filter<R>(
         &mut self,
-        context: FilterCompilerContext<'heap>,
+        context: FilterCompilerContext,
         node: &'heap Node<'heap>,
         sink: &mut FilterSink<'_, 'heap, R>,
     ) -> Result<(), CompilationError>
@@ -37,16 +37,16 @@ impl<'env, 'heap: 'env> GraphReadCompiler<'env, 'heap> {
                 kind:
                     VariableKind::Local(LocalVariable {
                         span: _,
-                        name,
+                        id,
                         arguments: _,
                     }),
             }) => {
                 debug_assert_ne!(
-                    name.value, context.param_name,
+                    id.value, context.param_id,
                     "typecheck should have caught this, cannot just return the entity itself."
                 );
 
-                let value = self.locals[&name.value];
+                let value = self.locals[&id.value];
                 self.compile_filter(context, value, sink)
             }
             NodeKind::Variable(Variable {
@@ -60,13 +60,18 @@ impl<'env, 'heap: 'env> GraphReadCompiler<'env, 'heap> {
             }
             NodeKind::Let(Let {
                 span: _,
-                name,
-                value,
+                bindings,
                 body,
             }) => {
-                self.locals.insert(name.value, value);
+                for Binding { binder, value } in bindings {
+                    self.locals.insert(binder.id, value);
+                }
+
                 let filter = self.compile_filter(context, body, sink);
-                self.locals.remove(&name.value);
+
+                for Binding { binder, value: _ } in bindings {
+                    self.locals.remove(&binder.id);
+                }
 
                 filter
             }

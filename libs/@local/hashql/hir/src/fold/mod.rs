@@ -68,14 +68,17 @@ use crate::{
         branch::{Branch, BranchKind, r#if::If},
         call::{Call, CallArgument},
         closure::{Closure, ClosureParam, ClosureSignature},
-        data::{Data, DataKind, Literal, Tuple},
+        data::{
+            Data, DataKind, Dict, List, Literal, Struct, Tuple, dict::DictField,
+            r#struct::StructField,
+        },
         graph::{
             Graph, GraphKind,
             read::{GraphRead, GraphReadBody, GraphReadHead, GraphReadTail},
         },
         input::Input,
         kind::NodeKind,
-        r#let::Let,
+        r#let::{Binder, Binding, Let, VarId},
         operation::{
             BinaryOperation, Operation, OperationKind, TypeOperation, UnaryOperation,
             r#type::{TypeAssertion, TypeConstructor, TypeOperationKind},
@@ -140,6 +143,10 @@ pub trait Fold<'heap> {
     #[expect(unused_variables, reason = "trait definition")]
     fn visit_id(&mut self, id: HirId) {
         // do nothing, no fields to walk
+    }
+
+    fn fold_var_id(&mut self, id: VarId) -> Self::Output<VarId> {
+        Try::from_output(id)
     }
 
     fn fold_type_id(&mut self, id: TypeId) -> Self::Output<TypeId> {
@@ -216,8 +223,31 @@ pub trait Fold<'heap> {
         walk_literal(self, literal)
     }
 
+    fn fold_struct_field(&mut self, field: StructField<'heap>) -> Self::Output<StructField<'heap>> {
+        walk_struct_field(self, field)
+    }
+
+    /// Fold a struct
+    ///
+    /// The caller must ensure that the struct fields do not have duplicate field names.
+    fn fold_struct(&mut self, r#struct: Struct<'heap>) -> Self::Output<Struct<'heap>> {
+        walk_struct(self, r#struct)
+    }
+
     fn fold_tuple(&mut self, tuple: Tuple<'heap>) -> Self::Output<Tuple<'heap>> {
         walk_tuple(self, tuple)
+    }
+
+    fn fold_list(&mut self, list: List<'heap>) -> Self::Output<List<'heap>> {
+        walk_list(self, list)
+    }
+
+    fn fold_dict(&mut self, dict: Dict<'heap>) -> Self::Output<Dict<'heap>> {
+        walk_dict(self, dict)
+    }
+
+    fn fold_dict_field(&mut self, field: DictField<'heap>) -> Self::Output<DictField<'heap>> {
+        walk_dict_field(self, field)
     }
 
     fn fold_variable(&mut self, variable: Variable<'heap>) -> Self::Output<Variable<'heap>> {
@@ -240,6 +270,14 @@ pub trait Fold<'heap> {
 
     fn fold_let(&mut self, r#let: Let<'heap>) -> Self::Output<Let<'heap>> {
         walk_let(self, r#let)
+    }
+
+    fn fold_binding(&mut self, binding: Binding<'heap>) -> Self::Output<Binding<'heap>> {
+        walk_binding(self, binding)
+    }
+
+    fn fold_binder(&mut self, binding: Binder<'heap>) -> Self::Output<Binder<'heap>> {
+        walk_binder(self, binding)
     }
 
     fn fold_input(&mut self, input: Input<'heap>) -> Self::Output<Input<'heap>> {
@@ -494,6 +532,9 @@ pub fn walk_data<'heap, T: Fold<'heap> + ?Sized>(
     let kind = match kind {
         DataKind::Literal(literal) => DataKind::Literal(visitor.fold_literal(literal)?),
         DataKind::Tuple(tuple) => DataKind::Tuple(visitor.fold_tuple(tuple)?),
+        DataKind::Struct(r#struct) => DataKind::Struct(visitor.fold_struct(r#struct)?),
+        DataKind::List(list) => DataKind::List(visitor.fold_list(list)?),
+        DataKind::Dict(dict) => DataKind::Dict(visitor.fold_dict(dict)?),
     };
 
     Try::from_output(Data { span, kind })
@@ -508,6 +549,29 @@ pub fn walk_literal<'heap, T: Fold<'heap> + ?Sized>(
     Try::from_output(Literal { span, kind })
 }
 
+pub fn walk_struct_field<'heap, T: Fold<'heap> + ?Sized>(
+    visitor: &mut T,
+    StructField { name, value }: StructField<'heap>,
+) -> T::Output<StructField<'heap>> {
+    let name = visitor.fold_ident(name)?;
+    let value = visitor.fold_nested_node(value)?;
+
+    Try::from_output(StructField { name, value })
+}
+
+pub fn walk_struct<'heap, T: Fold<'heap> + ?Sized>(
+    visitor: &mut T,
+    Struct { span, fields }: Struct<'heap>,
+) -> T::Output<Struct<'heap>> {
+    let span = visitor.fold_span(span)?;
+
+    let mut fields = Beef::new(fields);
+    fields.try_map::<_, T::Output<()>>(|field| visitor.fold_struct_field(field))?;
+    let fields = fields.finish_with(|slice| visitor.interner().intern_struct_fields(slice));
+
+    Try::from_output(Struct { span, fields })
+}
+
 pub fn walk_tuple<'heap, T: Fold<'heap> + ?Sized>(
     visitor: &mut T,
     Tuple { span, fields }: Tuple<'heap>,
@@ -519,6 +583,42 @@ pub fn walk_tuple<'heap, T: Fold<'heap> + ?Sized>(
     let fields = fields.finish(&visitor.interner().nodes);
 
     Try::from_output(Tuple { span, fields })
+}
+
+pub fn walk_list<'heap, T: Fold<'heap> + ?Sized>(
+    visitor: &mut T,
+    List { span, elements }: List<'heap>,
+) -> T::Output<List<'heap>> {
+    let span = visitor.fold_span(span)?;
+
+    let mut elements = Beef::new(elements);
+    elements.try_map::<_, T::Output<()>>(|element| visitor.fold_nested_node(element))?;
+    let elements = elements.finish(&visitor.interner().nodes);
+
+    Try::from_output(List { span, elements })
+}
+
+pub fn walk_dict<'heap, T: Fold<'heap> + ?Sized>(
+    visitor: &mut T,
+    Dict { span, fields }: Dict<'heap>,
+) -> T::Output<Dict<'heap>> {
+    let span = visitor.fold_span(span)?;
+
+    let mut fields = Beef::new(fields);
+    fields.try_map::<_, T::Output<()>>(|field| visitor.fold_dict_field(field))?;
+    let fields = fields.finish(&visitor.interner().dict_fields);
+
+    Try::from_output(Dict { span, fields })
+}
+
+pub fn walk_dict_field<'heap, T: Fold<'heap> + ?Sized>(
+    visitor: &mut T,
+    DictField { key, value }: DictField<'heap>,
+) -> T::Output<DictField<'heap>> {
+    let key = visitor.fold_nested_node(key)?;
+    let value = visitor.fold_nested_node(value)?;
+
+    Try::from_output(DictField { key, value })
 }
 
 pub fn walk_variable<'heap, T: Fold<'heap> + ?Sized>(
@@ -543,17 +643,22 @@ pub fn walk_local_variable<'heap, T: Fold<'heap> + ?Sized>(
     visitor: &mut T,
     LocalVariable {
         span,
-        name,
+        id,
         arguments,
     }: LocalVariable<'heap>,
 ) -> T::Output<LocalVariable<'heap>> {
     let span = visitor.fold_span(span)?;
-    let ident = visitor.fold_ident(name)?;
+
+    let id = Spanned {
+        span: visitor.fold_span(id.span)?,
+        value: visitor.fold_var_id(id.value)?,
+    };
+
     let arguments = visitor.fold_type_ids(arguments)?;
 
     Try::from_output(LocalVariable {
         span,
-        name: ident,
+        id,
         arguments,
     })
 }
@@ -581,23 +686,47 @@ pub fn walk_let<'heap, T: Fold<'heap> + ?Sized>(
     visitor: &mut T,
     Let {
         span,
-        name,
-        value,
+        bindings,
         body,
     }: Let<'heap>,
 ) -> T::Output<Let<'heap>> {
     let span = visitor.fold_span(span)?;
-    let name = visitor.fold_ident(name)?;
 
-    let value = visitor.fold_nested_node(value)?;
+    let mut bindings = Beef::new(bindings);
+    bindings.try_map::<_, T::Output<()>>(|binding| visitor.fold_binding(binding))?;
+
     let body = visitor.fold_nested_node(body)?;
 
     Try::from_output(Let {
         span,
-        name,
-        value,
+        bindings: bindings.finish(&visitor.interner().bindings),
         body,
     })
+}
+
+pub fn walk_binding<'heap, T: Fold<'heap> + ?Sized>(
+    visitor: &mut T,
+    Binding { binder, value }: Binding<'heap>,
+) -> T::Output<Binding<'heap>> {
+    let binder = visitor.fold_binder(binder)?;
+    let value = visitor.fold_nested_node(value)?;
+
+    Try::from_output(Binding { binder, value })
+}
+
+pub fn walk_binder<'heap, T: Fold<'heap> + ?Sized>(
+    visitor: &mut T,
+    Binder { id, name }: Binder<'heap>,
+) -> T::Output<Binder<'heap>> {
+    let id = visitor.fold_var_id(id)?;
+
+    let name = if let Some(name) = name {
+        Some(visitor.fold_ident(name)?)
+    } else {
+        None
+    };
+
+    Try::from_output(Binder { id, name })
 }
 
 pub fn walk_input<'heap, T: Fold<'heap> + ?Sized>(
@@ -890,7 +1019,7 @@ pub fn walk_closure_param<'heap, T: Fold<'heap> + ?Sized>(
 ) -> T::Output<ClosureParam<'heap>> {
     let span = visitor.fold_span(span)?;
 
-    let name = visitor.fold_ident(name)?;
+    let name = visitor.fold_binder(name)?;
 
     Try::from_output(ClosureParam { span, name })
 }

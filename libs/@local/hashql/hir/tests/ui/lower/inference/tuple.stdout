@@ -1,10 +1,10 @@
 ════ Initial HIR ═══════════════════════════════════════════════════════════════
 
-#is((1, 2, 3), type: (_0, _1, _2))
+#as((1, 2, 3), type: (_0, _1, _2))
 
 ════ HIR after type inference ══════════════════════════════════════════════════
 
-#is((1, 2, 3), type: (_0«Integer», _1«Integer», _2«Integer»))
+#as((1, 2, 3), type: (_0«Integer», _1«Integer», _2«Integer»))
 
 ════ Types ═════════════════════════════════════════════════════════════════════
 
@@ -20,6 +20,6 @@
 ┌─ (1, 2, 3)
 └→ (Integer, Integer, Integer)
 
-┌─ #is((1, 2, 3), type: (_0«Integer», _1«Integer», _2«Integer»))
+┌─ #as((1, 2, 3), type: (_0«Integer», _1«Integer», _2«Integer»))
 └→ (_0«Integer», _1«Integer», _2«Integer»)
 

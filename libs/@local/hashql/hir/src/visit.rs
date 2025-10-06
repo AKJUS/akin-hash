@@ -65,14 +65,17 @@ use crate::{
         branch::{Branch, BranchKind, r#if::If},
         call::{Call, CallArgument},
         closure::{Closure, ClosureParam, ClosureSignature},
-        data::{Data, DataKind, Literal, Tuple},
+        data::{
+            Data, DataKind, Dict, List, Literal, Struct, Tuple, dict::DictField,
+            r#struct::StructField,
+        },
         graph::{
             Graph, GraphKind,
             read::{GraphRead, GraphReadBody, GraphReadHead, GraphReadTail},
         },
         input::Input,
         kind::NodeKind,
-        r#let::Let,
+        r#let::{Binder, Binding, Let, VarId},
         operation::{
             BinaryOperation, Operation, OperationKind, TypeOperation, UnaryOperation,
             r#type::{TypeAssertion, TypeConstructor, TypeOperationKind},
@@ -121,6 +124,11 @@ pub trait Visitor<'heap> {
     }
 
     #[expect(unused_variables, reason = "trait definition")]
+    fn visit_var_id(&mut self, id: VarId) {
+        // do nothing, no fields to walk
+    }
+
+    #[expect(unused_variables, reason = "trait definition")]
     fn visit_type_id(&mut self, id: TypeId) {
         // do nothing, no fields to walk
     }
@@ -163,12 +171,32 @@ pub trait Visitor<'heap> {
         walk_literal(self, literal);
     }
 
-    fn visit_variable(&mut self, variable: &'heap Variable<'heap>) {
-        walk_variable(self, variable);
-    }
-
     fn visit_tuple(&mut self, tuple: &'heap Tuple<'heap>) {
         walk_tuple(self, tuple);
+    }
+
+    fn visit_struct_field(&mut self, field: &'heap StructField<'heap>) {
+        walk_struct_field(self, field);
+    }
+
+    fn visit_struct(&mut self, r#struct: &'heap Struct<'heap>) {
+        walk_struct(self, r#struct);
+    }
+
+    fn visit_list(&mut self, list: &'heap List<'heap>) {
+        walk_list(self, list);
+    }
+
+    fn visit_dict(&mut self, dict: &'heap Dict<'heap>) {
+        walk_dict(self, dict);
+    }
+
+    fn visit_dict_field(&mut self, field: &'heap DictField<'heap>) {
+        walk_dict_field(self, field);
+    }
+
+    fn visit_variable(&mut self, variable: &'heap Variable<'heap>) {
+        walk_variable(self, variable);
     }
 
     fn visit_local_variable(&mut self, variable: &'heap LocalVariable<'heap>) {
@@ -177,6 +205,14 @@ pub trait Visitor<'heap> {
 
     fn visit_qualified_variable(&mut self, variable: &'heap QualifiedVariable<'heap>) {
         walk_qualified_variable(self, variable);
+    }
+
+    fn visit_binder(&mut self, binding: &'heap Binder<'heap>) {
+        walk_binder(self, binding);
+    }
+
+    fn visit_binding(&mut self, binding: &'heap Binding<'heap>) {
+        walk_binding(self, binding);
     }
 
     fn visit_let(&mut self, r#let: &'heap Let<'heap>) {
@@ -311,6 +347,9 @@ pub fn walk_data<'heap, T: Visitor<'heap> + ?Sized>(
     match kind {
         DataKind::Literal(literal) => visitor.visit_literal(literal),
         DataKind::Tuple(tuple) => visitor.visit_tuple(tuple),
+        DataKind::Struct(r#struct) => visitor.visit_struct(r#struct),
+        DataKind::List(list) => visitor.visit_list(list),
+        DataKind::Dict(dict) => visitor.visit_dict(dict),
     }
 }
 
@@ -332,6 +371,55 @@ pub fn walk_tuple<'heap, T: Visitor<'heap> + ?Sized>(
     }
 }
 
+pub fn walk_struct_field<'heap, T: Visitor<'heap> + ?Sized>(
+    visitor: &mut T,
+    StructField { name, value }: &'heap StructField<'heap>,
+) {
+    visitor.visit_ident(name);
+    visitor.visit_node(value);
+}
+
+pub fn walk_struct<'heap, T: Visitor<'heap> + ?Sized>(
+    visitor: &mut T,
+    Struct { span, fields }: &'heap Struct<'heap>,
+) {
+    visitor.visit_span(*span);
+
+    for field in fields {
+        visitor.visit_struct_field(field);
+    }
+}
+
+pub fn walk_list<'heap, T: Visitor<'heap> + ?Sized>(
+    visitor: &mut T,
+    List { span, elements }: &'heap List<'heap>,
+) {
+    visitor.visit_span(*span);
+
+    for element in elements {
+        visitor.visit_node(element);
+    }
+}
+
+pub fn walk_dict<'heap, T: Visitor<'heap> + ?Sized>(
+    visitor: &mut T,
+    Dict { span, fields }: &'heap Dict<'heap>,
+) {
+    visitor.visit_span(*span);
+
+    for field in fields {
+        visitor.visit_dict_field(field);
+    }
+}
+
+pub fn walk_dict_field<'heap, T: Visitor<'heap> + ?Sized>(
+    visitor: &mut T,
+    DictField { key, value }: &'heap DictField<'heap>,
+) {
+    visitor.visit_node(key);
+    visitor.visit_node(value);
+}
+
 pub fn walk_variable<'heap, T: Visitor<'heap> + ?Sized>(
     visitor: &mut T,
     Variable { span, kind }: &'heap Variable<'heap>,
@@ -348,12 +436,14 @@ pub fn walk_local_variable<'heap, T: Visitor<'heap> + ?Sized>(
     visitor: &mut T,
     LocalVariable {
         span,
-        name,
+        id,
         arguments,
     }: &'heap LocalVariable<'heap>,
 ) {
     visitor.visit_span(*span);
-    visitor.visit_ident(name);
+
+    visitor.visit_span(id.span);
+    visitor.visit_var_id(id.value);
 
     for &argument in arguments {
         visitor.visit_type_id(argument.value);
@@ -376,19 +466,39 @@ pub fn walk_qualified_variable<'heap, T: Visitor<'heap> + ?Sized>(
     }
 }
 
+pub fn walk_binder<'heap, T: Visitor<'heap> + ?Sized>(
+    visitor: &mut T,
+    Binder { id, name }: &'heap Binder<'heap>,
+) {
+    visitor.visit_var_id(*id);
+
+    if let Some(name) = name {
+        visitor.visit_ident(name);
+    }
+}
+
+pub fn walk_binding<'heap, T: Visitor<'heap> + ?Sized>(
+    visitor: &mut T,
+    Binding { binder, value }: &'heap Binding<'heap>,
+) {
+    visitor.visit_binder(binder);
+    visitor.visit_node(value);
+}
+
 pub fn walk_let<'heap, T: Visitor<'heap> + ?Sized>(
     visitor: &mut T,
     Let {
         span,
-        name,
-        value,
+        bindings,
         body,
     }: &'heap Let<'heap>,
 ) {
     visitor.visit_span(*span);
-    visitor.visit_ident(name);
 
-    visitor.visit_node(value);
+    for binding in bindings {
+        visitor.visit_binding(binding);
+    }
+
     visitor.visit_node(body);
 }
 
@@ -606,7 +716,7 @@ pub fn walk_closure_param<'heap, T: Visitor<'heap> + ?Sized>(
 ) {
     visitor.visit_span(*span);
 
-    visitor.visit_ident(name);
+    visitor.visit_binder(name);
 }
 
 pub fn walk_graph<'heap, T: Visitor<'heap> + ?Sized>(

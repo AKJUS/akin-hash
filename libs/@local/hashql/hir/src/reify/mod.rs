@@ -6,39 +6,43 @@ use hashql_ast::{
     lowering::ExtractedTypes,
     node::{
         expr::{
-            AsExpr, CallExpr, ClosureExpr, Expr, ExprKind, FieldExpr, IfExpr, IndexExpr, InputExpr,
-            LetExpr, LiteralExpr, TupleExpr, call::Argument, closure,
+            AsExpr, CallExpr, ClosureExpr, DictExpr, Expr, ExprKind, FieldExpr, IfExpr, IndexExpr,
+            InputExpr, LetExpr, ListExpr, LiteralExpr, StructExpr, TupleExpr, call::Argument,
+            dict::DictEntry,
         },
         path::{Path, PathSegmentArgument},
         r#type::Type,
     },
 };
 use hashql_core::{
-    collection::SmallVec,
+    collection::{FastHashMap, HashMapExt as _, SmallVec},
     heap,
     intern::Interned,
     span::{SpanId, Spanned},
     symbol::{Ident, IdentKind, Symbol, sym},
-    r#type::{TypeId, environment::Environment},
+    r#type::TypeId,
 };
 use hashql_diagnostics::{DiagnosticIssues, Status, StatusExt as _};
 
 use self::error::{
     ReificationDiagnosticIssues, ReificationStatus, dummy_expression, internal_error,
-    underscore_expression, unprocessed_expression, unsupported_construct,
+    underscore_expression, unprocessed_expression,
 };
 use crate::{
-    intern::Interner,
+    context::HirContext,
     node::{
         Node, PartialNode,
         access::{Access, AccessKind, field::FieldAccess, index::IndexAccess},
         branch::{Branch, BranchKind, r#if::If},
         call::{Call, CallArgument},
         closure::{Closure, ClosureParam, ClosureSignature},
-        data::{Data, DataKind, Literal, Tuple},
+        data::{
+            Data, DataKind, Dict, List, Literal, Struct, Tuple, dict::DictField,
+            r#struct::StructField,
+        },
         input::Input,
         kind::NodeKind,
-        r#let::Let,
+        r#let::{Binder, Binding, Let, VarId},
         operation::{
             Operation, OperationKind, TypeOperation,
             r#type::{TypeAssertion, TypeOperationKind},
@@ -48,19 +52,24 @@ use crate::{
     path::QualifiedPath,
 };
 
+enum Fold<'heap> {
+    Partial(NodeKind<'heap>),
+    Promote(Node<'heap>),
+}
+
 // TODO: we might want to contemplate moving this into a separate crate, to completely separate
 // HashQL's AST and HIR. (like done in rustc)
 #[derive(Debug)]
-struct ReificationContext<'env, 'heap> {
-    env: &'env Environment<'heap>,
-    interner: &'env Interner<'heap>,
+struct ReificationContext<'ctx, 'env, 'heap> {
+    context: &'ctx mut HirContext<'env, 'heap>,
     types: &'env ExtractedTypes<'heap>,
     diagnostics: ReificationDiagnosticIssues,
+    binder_scope: FastHashMap<Symbol<'heap>, VarId>,
 
     scratch_ident: Vec<Ident<'heap>>,
 }
 
-impl<'heap> ReificationContext<'_, 'heap> {
+impl<'heap> ReificationContext<'_, '_, 'heap> {
     fn call_arguments(
         &mut self,
         args: heap::Vec<'heap, Argument<'heap>>,
@@ -84,7 +93,7 @@ impl<'heap> ReificationContext<'_, 'heap> {
             return None;
         }
 
-        Some(self.interner.intern_call_arguments(&arguments))
+        Some(self.context.interner.intern_call_arguments(&arguments))
     }
 
     fn call_expr(
@@ -133,7 +142,10 @@ impl<'heap> ReificationContext<'_, 'heap> {
                 span,
                 kind: TypeOperationKind::Assertion(TypeAssertion {
                     span,
-                    value: self.interner.intern_node(PartialNode { span, kind }),
+                    value: self
+                        .context
+                        .interner
+                        .intern_node(PartialNode { span, kind }),
                     r#type: self.types.anonymous[r#type.id],
                     force: false,
                 }),
@@ -150,19 +162,24 @@ impl<'heap> ReificationContext<'_, 'heap> {
             r#type,
         }: TupleExpr<'heap>,
     ) -> Option<NodeKind<'heap>> {
-        let mut incomplete = false;
-        let mut fields = SmallVec::with_capacity(elements.len());
+        let len = elements.len();
+        let mut fields = SmallVec::with_capacity(len);
 
-        for element in elements {
+        for (index, element) in elements.into_iter().enumerate() {
             let Some(field) = self.expr(*element.value) else {
-                incomplete = true;
                 continue;
             };
+
+            if fields.len() != index {
+                // Since a previous iteration has failed we can skip any subsequent pushes, this
+                // allows the `SmallVec` to avoid reallocations if we're going to fail anyway.
+                continue;
+            }
 
             fields.push(field);
         }
 
-        if incomplete {
+        if fields.len() != len {
             return None;
         }
 
@@ -170,7 +187,145 @@ impl<'heap> ReificationContext<'_, 'heap> {
             span,
             kind: DataKind::Tuple(Tuple {
                 span,
-                fields: self.interner.intern_nodes(&fields),
+                fields: self.context.interner.intern_nodes(&fields),
+            }),
+        });
+
+        Some(self.wrap_type_assertion(span, kind, r#type))
+    }
+
+    fn list_expr(
+        &mut self,
+        ListExpr {
+            id: _,
+            span,
+            elements: list_elements,
+            r#type,
+        }: ListExpr<'heap>,
+    ) -> Option<NodeKind<'heap>> {
+        let len = list_elements.len();
+        let mut elements = SmallVec::with_capacity(len);
+
+        for (index, element) in list_elements.into_iter().enumerate() {
+            let Some(element) = self.expr(*element.value) else {
+                continue;
+            };
+
+            if elements.len() != index {
+                // Since a previous iteration has failed we can skip any subsequent pushes, this
+                // allows the `SmallVec` to avoid reallocations if we're going to fail anyway.
+                continue;
+            }
+
+            elements.push(element);
+        }
+
+        if elements.len() != len {
+            return None;
+        }
+
+        let kind = NodeKind::Data(Data {
+            span,
+            kind: DataKind::List(List {
+                span,
+                elements: self.context.interner.intern_nodes(&elements),
+            }),
+        });
+
+        Some(self.wrap_type_assertion(span, kind, r#type))
+    }
+
+    fn struct_expr(
+        &mut self,
+        StructExpr {
+            id: _,
+            span,
+            entries,
+            r#type,
+        }: StructExpr<'heap>,
+    ) -> Option<NodeKind<'heap>> {
+        let len = entries.len();
+        let mut fields = SmallVec::with_capacity(len);
+
+        for (index, entry) in entries.into_iter().enumerate() {
+            let Some(value) = self.expr(*entry.value) else {
+                continue;
+            };
+
+            if fields.len() != index {
+                // Since a previous iteration has failed we can skip any subsequent pushes, this
+                // allows the `SmallVec` to avoid reallocations if we're going to fail anyway.
+                continue;
+            }
+
+            fields.push(StructField {
+                name: entry.key,
+                value,
+            });
+        }
+
+        if fields.len() != len {
+            return None;
+        }
+
+        let kind = NodeKind::Data(Data {
+            span,
+            kind: DataKind::Struct(Struct {
+                span,
+                fields: self.context.interner.intern_struct_fields(&mut fields),
+            }),
+        });
+
+        Some(self.wrap_type_assertion(span, kind, r#type))
+    }
+
+    fn dict_expr(
+        &mut self,
+        DictExpr {
+            id: _,
+            span,
+            entries,
+            r#type,
+        }: DictExpr<'heap>,
+    ) -> Option<NodeKind<'heap>> {
+        let len = entries.len();
+        let mut fields = SmallVec::with_capacity(len);
+
+        for (
+            index,
+            DictEntry {
+                id: _,
+                span: _,
+                key,
+                value,
+            },
+        ) in entries.into_iter().enumerate()
+        {
+            let key = self.expr(*key);
+            let value = self.expr(*value);
+
+            let Some((key, value)) = Option::zip(key, value) else {
+                continue;
+            };
+
+            if fields.len() != index {
+                // Since a previous iteration has failed we can skip any subsequent pushes, this
+                // allows the `SmallVec` to avoid reallocations if we're going to fail anyway.
+                continue;
+            }
+
+            fields.push(DictField { key, value });
+        }
+
+        if fields.len() != len {
+            return None;
+        }
+
+        let kind = NodeKind::Data(Data {
+            span,
+            kind: DataKind::Dict(Dict {
+                span,
+                fields: self.context.interner.intern_dict_fields(&fields),
             }),
         });
 
@@ -229,18 +384,26 @@ impl<'heap> ReificationContext<'_, 'heap> {
         if incomplete {
             None
         } else {
-            Some(self.interner.intern_type_ids(&types))
+            Some(self.context.interner.intern_type_ids(&types))
         }
     }
 
     fn path(&mut self, path: Path<'heap>) -> Option<NodeKind<'heap>> {
         let span = path.span;
         let kind = match path.into_generic_ident() {
-            Ok((ident, args)) => VariableKind::Local(LocalVariable {
-                span,
-                name: ident,
-                arguments: self.path_segment_arguments(args)?,
-            }),
+            Ok((ident, args)) => {
+                // undeclared variables should have been resolved in the AST (import resolution)
+                let binder = self.binder_scope[&ident.value];
+
+                VariableKind::Local(LocalVariable {
+                    span,
+                    id: Spanned {
+                        span: ident.span,
+                        value: binder,
+                    },
+                    arguments: self.path_segment_arguments(args)?,
+                })
+            }
             Err(mut path) => {
                 if !path.rooted {
                     self.diagnostics.push(internal_error(
@@ -256,7 +419,7 @@ impl<'heap> ReificationContext<'_, 'heap> {
                         .last_mut()
                         .unwrap_or_else(|| unreachable!())
                         .arguments,
-                    self.env.heap.vec(Some(0)), // capacity of 0 does not allocate
+                    self.context.heap.vec(Some(0)), // capacity of 0 does not allocate
                 );
 
                 let mut segments = SmallVec::with_capacity(path.segments.len());
@@ -266,7 +429,9 @@ impl<'heap> ReificationContext<'_, 'heap> {
 
                 VariableKind::Qualified(QualifiedVariable {
                     span,
-                    path: QualifiedPath::new_unchecked(self.interner.intern_idents(&segments)),
+                    path: QualifiedPath::new_unchecked(
+                        self.context.interner.intern_idents(&segments),
+                    ),
                     arguments: self.path_segment_arguments(arguments)?,
                 })
             }
@@ -285,20 +450,58 @@ impl<'heap> ReificationContext<'_, 'heap> {
             r#type,
             body,
         }: LetExpr<'heap>,
-    ) -> Option<NodeKind<'heap>> {
-        let value = self.expr(*value);
-        let body = self.expr(*body);
+        bindings: Option<&mut Vec<Binding<'heap>>>,
+    ) -> Option<Fold<'heap>> {
+        let binder = Binder {
+            id: self.context.counter.var.next(),
+            name: Some(name),
+        };
 
-        let (value, body) = Option::zip(value, body)?;
+        // The name manager guarantees that the name is unique within the program
+        self.binder_scope.insert_unique(name.value, binder.id);
+        self.context.symbols.binder.insert(binder.id, name.value);
+
+        let value = self.expr(*value);
+
+        if let Some(bindings) = bindings {
+            // We're already nested, add us to the existing set of bindings
+            bindings.push(Binding {
+                binder,
+                value: value?,
+            });
+
+            // Simply return the body instead of us directly
+            let body = self.expr_fold(*body, Some(bindings));
+            self.binder_scope.remove(&name.value);
+
+            return body.map(Fold::Promote);
+        }
+
+        let mut bindings = Vec::new();
+        let mut incomplete = true;
+
+        // We don't immediately return, and instead just delay it so that we can collect errors in
+        // the body.
+        if let Some(value) = value {
+            incomplete = false;
+            bindings.push(Binding { binder, value });
+        }
+
+        let body = self.expr_fold(*body, Some(&mut bindings));
+        self.binder_scope.remove(&name.value);
+
+        let body = body?;
+        if incomplete {
+            return None;
+        }
 
         let kind = NodeKind::Let(Let {
             span,
-            name,
-            value,
+            bindings: self.context.interner.bindings.intern_slice(&bindings),
             body,
         });
 
-        Some(self.wrap_type_assertion(span, kind, r#type))
+        Some(Fold::Partial(self.wrap_type_assertion(span, kind, r#type)))
     }
 
     fn input_expr(
@@ -325,32 +528,6 @@ impl<'heap> ReificationContext<'_, 'heap> {
         Some(kind)
     }
 
-    fn closure_signature(
-        &self,
-        closure::ClosureSignature {
-            id,
-            span,
-            generics: _,
-            inputs,
-            output: _,
-        }: closure::ClosureSignature<'heap>,
-    ) -> ClosureSignature<'heap> {
-        let def = self.types.signatures[id];
-        let params: SmallVec<_> = inputs
-            .iter()
-            .map(|param| ClosureParam {
-                span: param.span,
-                name: param.name,
-            })
-            .collect();
-
-        ClosureSignature {
-            span,
-            def,
-            params: self.interner.intern_closure_params(&params),
-        }
-    }
-
     fn closure_expr(
         &mut self,
         ClosureExpr {
@@ -360,11 +537,42 @@ impl<'heap> ReificationContext<'_, 'heap> {
             body,
         }: ClosureExpr<'heap>,
     ) -> Option<NodeKind<'heap>> {
+        let signature_def = self.types.signatures[signature.id];
+
+        let mut params = SmallVec::with_capacity(signature.inputs.len());
+        for &hashql_ast::node::expr::closure::ClosureParam {
+            id: _,
+            span,
+            name,
+            bound: _,
+        } in &signature.inputs
+        {
+            let id = self.context.counter.var.next();
+            self.binder_scope.insert_unique(name.value, id);
+            self.context.symbols.binder.insert(id, name.value);
+
+            params.push(ClosureParam {
+                span,
+                name: Binder {
+                    id,
+                    name: Some(name),
+                },
+            });
+        }
+
         let body = self.expr(*body)?;
+
+        for param in &signature.inputs {
+            self.binder_scope.remove(&param.name.value);
+        }
 
         Some(NodeKind::Closure(Closure {
             span,
-            signature: self.closure_signature(*signature),
+            signature: ClosureSignature {
+                span: signature.span,
+                def: signature_def,
+                params: self.context.interner.intern_closure_params(&params),
+            },
             body,
         }))
     }
@@ -454,14 +662,14 @@ impl<'heap> ReificationContext<'_, 'heap> {
                 kind: VariableKind::Qualified(QualifiedVariable {
                     span,
                     path: QualifiedPath::new_unchecked(
-                        self.interner.intern_idents(&self.scratch_ident),
+                        self.context.interner.intern_idents(&self.scratch_ident),
                     ),
-                    arguments: self.interner.intern_type_ids(&[]),
+                    arguments: self.context.interner.intern_type_ids(&[]),
                 }),
             }),
         };
 
-        self.interner.intern_node(partial)
+        self.context.interner.intern_node(partial)
     }
 
     fn if_expr_if_else(
@@ -497,14 +705,14 @@ impl<'heap> ReificationContext<'_, 'heap> {
             kind: NodeKind::Call(Call {
                 span: node.span,
                 function: some,
-                arguments: self.interner.intern_call_arguments(&[CallArgument {
+                arguments: self.context.interner.intern_call_arguments(&[CallArgument {
                     span: node.span,
                     value: node,
                 }]),
             }),
         };
 
-        self.interner.intern_node(partial)
+        self.context.interner.intern_node(partial)
     }
 
     fn if_expr_else_none(&mut self, span: SpanId) -> Node<'heap> {
@@ -518,11 +726,11 @@ impl<'heap> ReificationContext<'_, 'heap> {
             kind: NodeKind::Call(Call {
                 span,
                 function: none,
-                arguments: self.interner.intern_call_arguments(&[]),
+                arguments: self.context.interner.intern_call_arguments(&[]),
             }),
         };
 
-        self.interner.intern_node(partial)
+        self.context.interner.intern_node(partial)
     }
 
     fn if_expr(
@@ -555,39 +763,26 @@ impl<'heap> ReificationContext<'_, 'heap> {
     }
 
     fn expr(&mut self, expr: Expr<'heap>) -> Option<Node<'heap>> {
+        self.expr_fold(expr, None)
+    }
+
+    fn expr_fold(
+        &mut self,
+        expr: Expr<'heap>,
+        bindings: Option<&mut Vec<Binding<'heap>>>,
+    ) -> Option<Node<'heap>> {
         let kind = match expr.kind {
             ExprKind::Call(call) => self.call_expr(call)?,
-            ExprKind::Struct(_) => {
-                self.diagnostics.push(unsupported_construct(
-                    expr.span,
-                    "struct literal",
-                    "https://linear.app/hash/issue/H-4602/enable-struct-literal-construct",
-                ));
-
-                return None;
-            }
-            ExprKind::Dict(_) => {
-                self.diagnostics.push(unsupported_construct(
-                    expr.span,
-                    "dict literal",
-                    "https://linear.app/hash/issue/H-4603/enable-dict-literal-construct",
-                ));
-
-                return None;
-            }
+            ExprKind::Struct(r#struct) => self.struct_expr(r#struct)?,
+            ExprKind::Dict(dict) => self.dict_expr(dict)?,
             ExprKind::Tuple(tuple) => self.tuple_expr(tuple)?,
-            ExprKind::List(_) => {
-                self.diagnostics.push(unsupported_construct(
-                    expr.span,
-                    "list literal",
-                    "https://linear.app/hash/issue/H-4605/enable-list-literal-construct",
-                ));
-
-                return None;
-            }
+            ExprKind::List(list) => self.list_expr(list)?,
             ExprKind::Literal(literal) => self.literal_expr(literal),
             ExprKind::Path(path) => self.path(path)?,
-            ExprKind::Let(r#let) => self.let_expr(r#let)?,
+            ExprKind::Let(r#let) => match self.let_expr(r#let, bindings)? {
+                Fold::Partial(kind) => kind,
+                Fold::Promote(node) => return Some(node),
+            },
             ExprKind::Type(_) => {
                 self.diagnostics.push(unprocessed_expression(
                     expr.span,
@@ -631,7 +826,7 @@ impl<'heap> ReificationContext<'_, 'heap> {
             }
         };
 
-        Some(self.interner.intern_node(PartialNode {
+        Some(self.context.interner.intern_node(PartialNode {
             span: expr.span,
             kind,
         }))
@@ -649,8 +844,6 @@ impl<'heap> Node<'heap> {
     ///
     /// The function returns diagnostic errors for several categories of issues:
     ///
-    /// - **Unsupported constructs** - Language features not yet implemented (struct literals, if
-    ///   expressions, tuple literals, etc.) with links to tracking issues
     /// - **Unprocessed expressions** - AST nodes that should have been handled by earlier
     ///   compilation phases (type declarations, use statements)
     /// - **Internal errors** - Inconsistent state that indicates bugs in the compiler pipeline
@@ -658,18 +851,28 @@ impl<'heap> Node<'heap> {
     ///
     /// Critical errors prevent HIR node creation, while non-critical diagnostics are included
     /// as advisories in successful results.
-    pub fn from_ast(
+    pub fn from_ast<'env>(
         expr: Expr<'heap>,
-        env: &Environment<'heap>,
-        interner: &Interner<'heap>,
-        types: &ExtractedTypes<'heap>,
+        context: &mut HirContext<'env, 'heap>,
+        types: &'env ExtractedTypes<'heap>,
     ) -> ReificationStatus<Self> {
+        // pre-populate the binder_scope and symbol table with types, as ctor might reference them
+        // once `ConvertTypeConstructor` is run, these variables are no longer referenced inside the
+        // tree
+        let mut binder_scope = FastHashMap::default();
+        for local in types.locals.iter() {
+            let id = context.counter.var.next();
+            binder_scope.insert_unique(local.name, id);
+            context.symbols.binder.insert(id, local.name);
+        }
+
         let expr_span = expr.span;
         let mut context = ReificationContext {
-            env,
-            interner,
+            context,
             types,
             diagnostics: DiagnosticIssues::new(),
+            binder_scope,
+
             // we're likely to only ever create qualified paths of length 3 or less
             scratch_ident: Vec::with_capacity(3),
         };
