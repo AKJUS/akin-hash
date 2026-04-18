@@ -7722,7 +7722,7 @@ __metadata:
     storybook: "npm:9.1.19"
     tsdown: "npm:^0.21.4"
     typescript: "npm:5.9.3"
-    vite: "npm:7.3.2"
+    vite: "npm:8.0.5"
     vite-plugin-dts: "npm:4.5.4"
     vitest: "npm:^4.0.16"
     vitest-browser-react: "npm:^2.0.2"
@@ -7762,7 +7762,7 @@ __metadata:
     sync-fetch: "npm:0.5.2"
     tsdown: "npm:^0.21.4"
     typescript: "npm:5.9.3"
-    vite: "npm:7.3.2"
+    vite: "npm:8.0.5"
     vitest: "npm:^4.0.16"
   languageName: unknown
   linkType: soft
@@ -7933,11 +7933,11 @@ __metadata:
   linkType: soft
 
 "@hono/node-server@npm:^1.19.9":
-  version: 1.19.11
-  resolution: "@hono/node-server@npm:1.19.11"
+  version: 1.19.14
+  resolution: "@hono/node-server@npm:1.19.14"
   peerDependencies:
     hono: ^4
-  checksum: 10c0/34b1c29c249c5cd95469980b5c359370f3cbab49b3603f324a4afbf895d68b8d5485c71f1887769eabeb3499276c49e7102084234b4feb3853edb748aaa85f50
+  checksum: 10c0/41a099bb3705d96aac44b7a8db8805f2a22ce8a0f767a27b6d10b74a9964925df01c5f35d3631e882f8bcdeee3518884c30f40588ac8c960d88bf71048ba0df3
   languageName: node
   linkType: hard
 
@@ -23425,9 +23425,9 @@ __metadata:
   linkType: hard
 
 "basic-ftp@npm:^5.0.2":
-  version: 5.2.0
-  resolution: "basic-ftp@npm:5.2.0"
-  checksum: 10c0/a0f85c01deae0723021f9bf4a7be29378186fa8bba41e74ea11832fe74c187ce90c3599c3cc5ec936581cfd150020e79f4a9ed0ee9fb20b2308e69b045f3a059
+  version: 5.3.0
+  resolution: "basic-ftp@npm:5.3.0"
+  checksum: 10c0/307ebc0635d06e671729d348e45e6eaec5f926713f93de535b268e17ae675942cd6903a84196cece948b54e04b24591431be3df79b2824551a0d5ed150555fb2
   languageName: node
   linkType: hard
 
@@ -23692,12 +23692,12 @@ __metadata:
   linkType: hard
 
 "brace-expansion@npm:^1.1.7":
-  version: 1.1.12
-  resolution: "brace-expansion@npm:1.1.12"
+  version: 1.1.14
+  resolution: "brace-expansion@npm:1.1.14"
   dependencies:
     balanced-match: "npm:^1.0.0"
     concat-map: "npm:0.0.1"
-  checksum: 10c0/975fecac2bb7758c062c20d0b3b6288c7cc895219ee25f0a64a9de662dbac981ff0b6e89909c3897c1f84fa353113a721923afdec5f8b2350255b097f12b1f73
+  checksum: 10c0/b6fdac832bc4e36a753658c9ed052c2e1a2be221763b002df25d1efbf7d21724334e726a6cd5eadc72a4b19ec3efb632d629cc003bc9c62f7af7a7915ffa4385
   languageName: node
   linkType: hard
 
@@ -29374,12 +29374,12 @@ __metadata:
   linkType: hard
 
 "follow-redirects@npm:^1.0.0, follow-redirects@npm:^1.15.11":
-  version: 1.15.11
-  resolution: "follow-redirects@npm:1.15.11"
+  version: 1.16.0
+  resolution: "follow-redirects@npm:1.16.0"
   peerDependenciesMeta:
     debug:
       optional: true
-  checksum: 10c0/d301f430542520a54058d4aeeb453233c564aaccac835d29d15e050beb33f339ad67d9bddbce01739c5dc46a6716dbe3d9d0d5134b1ca203effa11a7ef092343
+  checksum: 10c0/a1e2900163e6f1b4d1ed5c221b607f41decbab65534c63fe7e287e40a5d552a6496e7d9d7d976fa4ba77b4c51c11e5e9f683f10b43011ea11e442ff128d0e181
   languageName: node
   linkType: hard
 
@@ -30968,9 +30968,9 @@ __metadata:
   linkType: hard
 
 "hono@npm:^4.11.4":
-  version: 4.12.5
-  resolution: "hono@npm:4.12.5"
-  checksum: 10c0/a8cf0c988e84b370978b57d941fc543b93994b7b01c847611ec73be8e8c9fda5baeac8be08a44eaefdf215381fea2620ccb742ff5c4eaeecb35b92f6a75832c6
+  version: 4.12.14
+  resolution: "hono@npm:4.12.14"
+  checksum: 10c0/78de4c98a9a3da0f067e38dcc4bd27f0d82b45d146ac39f5ca688515ee482c0a2e704d2ac6c1ee91ad17596b7c52b3e4b9483acd9c238d42f6ebcb43414a71b6
   languageName: node
   linkType: hard
 
@@ -39362,8 +39362,8 @@ __metadata:
   linkType: hard
 
 "protobufjs@npm:^7.2.3, protobufjs@npm:^7.2.5, protobufjs@npm:^7.3.0, protobufjs@npm:^7.4.0, protobufjs@npm:^7.5.4":
-  version: 7.5.4
-  resolution: "protobufjs@npm:7.5.4"
+  version: 7.5.5
+  resolution: "protobufjs@npm:7.5.5"
   dependencies:
     "@protobufjs/aspromise": "npm:^1.1.2"
     "@protobufjs/base64": "npm:^1.1.2"
@@ -39377,7 +39377,7 @@ __metadata:
     "@protobufjs/utf8": "npm:^1.1.0"
     "@types/node": "npm:>=13.7.0"
     long: "npm:^5.0.0"
-  checksum: 10c0/913b676109ffb3c05d3d31e03a684e569be91f3bba8613da4a683d69d9dba948daa2afd7d2e7944d1aa6c417890c35d9d9a8883c1160affafb0f9670d59ef722
+  checksum: 10c0/3d48896a916761e3e60b52f80027eb4fba3f5a6e3f8461e04939db18812db2cb0db4c73d03e1134a960e99525ae1d236f076a0bc01273016f573b76f33ffbd47
   languageName: node
   linkType: hard
 
@@ -41807,9 +41807,9 @@ __metadata:
   linkType: hard
 
 "serialize-javascript@npm:^7.0.3":
-  version: 7.0.4
-  resolution: "serialize-javascript@npm:7.0.4"
-  checksum: 10c0/f3da6f994c41306fbfabb55eefe280a46da05592939a84b0d95c84e296c92ba9e6a3d86cf7bbd71e7a59e1cfcd8481745910af109bedbd3ed853b444d32f9ee9
+  version: 7.0.5
+  resolution: "serialize-javascript@npm:7.0.5"
+  checksum: 10c0/7b7818e5267f6d474ec7a56d36ba69dd712726a13eab37706ec94615fb7ca8945471f2b7fb0dc9dbe8c79c1930c1079d97f66f91315c8c8c2ca6c38898cec96f
   languageName: node
   linkType: hard
 
@@ -45594,61 +45594,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"vite@npm:7.3.2, vite@npm:^5.0.0 || ^6.0.0 || ^7.0.0-0":
-  version: 7.3.2
-  resolution: "vite@npm:7.3.2"
-  dependencies:
-    esbuild: "npm:^0.27.0"
-    fdir: "npm:^6.5.0"
-    fsevents: "npm:~2.3.3"
-    picomatch: "npm:^4.0.3"
-    postcss: "npm:^8.5.6"
-    rollup: "npm:^4.43.0"
-    tinyglobby: "npm:^0.2.15"
-  peerDependencies:
-    "@types/node": ^20.19.0 || >=22.12.0
-    jiti: ">=1.21.0"
-    less: ^4.0.0
-    lightningcss: ^1.21.0
-    sass: ^1.70.0
-    sass-embedded: ^1.70.0
-    stylus: ">=0.54.8"
-    sugarss: ^5.0.0
-    terser: ^5.16.0
-    tsx: ^4.8.1
-    yaml: ^2.4.2
-  dependenciesMeta:
-    fsevents:
-      optional: true
-  peerDependenciesMeta:
-    "@types/node":
-      optional: true
-    jiti:
-      optional: true
-    less:
-      optional: true
-    lightningcss:
-      optional: true
-    sass:
-      optional: true
-    sass-embedded:
-      optional: true
-    stylus:
-      optional: true
-    sugarss:
-      optional: true
-    terser:
-      optional: true
-    tsx:
-      optional: true
-    yaml:
-      optional: true
-  bin:
-    vite: bin/vite.js
-  checksum: 10c0/74be36907e208916f18bfec81c8eba18b869f0a170f1ece0a4dcb14874d0f0e7c022fb6c2ad896e3ee6c973fe88f53ac23b4078879ada340d8b263260868b8d4
-  languageName: node
-  linkType: hard
-
 "vite@npm:8.0.5, vite@npm:^6.0.0 || ^7.0.0 || ^8.0.0-0":
   version: 8.0.5
   resolution: "vite@npm:8.0.5"
@@ -45703,6 +45648,61 @@ __metadata:
   bin:
     vite: bin/vite.js
   checksum: 10c0/bfc22896b2661753c01c398a058f1859bdbd3ebe55f3d8505ab629b39e5f68790c0a6f55f8644b6692b0b9b8e210f698082ef9f4fd0d76509f4a46762fbfbba2
+  languageName: node
+  linkType: hard
+
+"vite@npm:^5.0.0 || ^6.0.0 || ^7.0.0-0":
+  version: 7.3.2
+  resolution: "vite@npm:7.3.2"
+  dependencies:
+    esbuild: "npm:^0.27.0"
+    fdir: "npm:^6.5.0"
+    fsevents: "npm:~2.3.3"
+    picomatch: "npm:^4.0.3"
+    postcss: "npm:^8.5.6"
+    rollup: "npm:^4.43.0"
+    tinyglobby: "npm:^0.2.15"
+  peerDependencies:
+    "@types/node": ^20.19.0 || >=22.12.0
+    jiti: ">=1.21.0"
+    less: ^4.0.0
+    lightningcss: ^1.21.0
+    sass: ^1.70.0
+    sass-embedded: ^1.70.0
+    stylus: ">=0.54.8"
+    sugarss: ^5.0.0
+    terser: ^5.16.0
+    tsx: ^4.8.1
+    yaml: ^2.4.2
+  dependenciesMeta:
+    fsevents:
+      optional: true
+  peerDependenciesMeta:
+    "@types/node":
+      optional: true
+    jiti:
+      optional: true
+    less:
+      optional: true
+    lightningcss:
+      optional: true
+    sass:
+      optional: true
+    sass-embedded:
+      optional: true
+    stylus:
+      optional: true
+    sugarss:
+      optional: true
+    terser:
+      optional: true
+    tsx:
+      optional: true
+    yaml:
+      optional: true
+  bin:
+    vite: bin/vite.js
+  checksum: 10c0/74be36907e208916f18bfec81c8eba18b869f0a170f1ece0a4dcb14874d0f0e7c022fb6c2ad896e3ee6c973fe88f53ac23b4078879ada340d8b263260868b8d4
   languageName: node
   linkType: hard
 
@@ -46838,9 +46838,9 @@ __metadata:
   linkType: hard
 
 "yaml@npm:^1.10.0, yaml@npm:^1.5.0":
-  version: 1.10.2
-  resolution: "yaml@npm:1.10.2"
-  checksum: 10c0/5c28b9eb7adc46544f28d9a8d20c5b3cb1215a886609a2fd41f51628d8aaa5878ccd628b755dbcd29f6bb4921bd04ffbc6dcc370689bb96e594e2f9813d2605f
+  version: 1.10.3
+  resolution: "yaml@npm:1.10.3"
+  checksum: 10c0/c309ff85a0a569a981d71ab9cf0fef68672a16b9cdf40639d1c3b30034f6cd16ee428602bd6d64ecf006f8c8bee499023cac236538f79898aa99fb5db529a2ed
   languageName: node
   linkType: hard
 
