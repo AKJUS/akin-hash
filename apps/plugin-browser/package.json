@@ -44,7 +44,7 @@
     "react-dom": "19.2.6",
     "uuid": "14.0.0",
     "webextension-polyfill": "0.12.0",
-    "ws": "8.18.3"
+    "ws": "8.20.1"
   },
   "devDependencies": {
     "@babel/core": "7.28.4",
@@ -91,7 +91,7 @@
     "typescript": "5.9.3",
     "webpack": "5.104.1",
     "webpack-cli": "6.0.1",
-    "webpack-dev-server": "5.2.3",
+    "webpack-dev-server": "5.2.4",
     "zip-webpack-plugin": "4.0.3"
   }
 }
