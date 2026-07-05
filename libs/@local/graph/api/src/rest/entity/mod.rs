@@ -1,5 +1,7 @@
 //! Web routes for CRU operations on entities.
 
+pub mod query;
+
 use alloc::sync::Arc;
 use std::collections::HashMap;
 
@@ -17,11 +19,11 @@ use hash_graph_store::{
         LinkDataValidationReport, LinkError, LinkTargetError, LinkValidationReport,
         LinkedEntityError, MetadataValidationReport, PatchEntityParams,
         PropertyMetadataValidationReport, QueryConversion, QueryEntitiesResponse,
-        SearchEntitiesFilter, SearchEntitiesResponse, SummarizeEntitiesParams,
-        SummarizeEntitiesResponse, UnexpectedEntityType, UpdateEntityEmbeddingsParams,
-        ValidateEntityComponents, ValidateEntityParams,
+        SearchEntitiesFilter, SearchEntitiesParams, SearchEntitiesResponse,
+        SummarizeEntitiesParams, SummarizeEntitiesResponse, UnexpectedEntityType,
+        UpdateEntityEmbeddingsParams, ValidateEntityComponents, ValidateEntityParams,
     },
-    entity_type::EntityTypeResolveDefinitions,
+    filter::SemanticDistance,
     pool::StorePool,
     query::{NullOrdering, Ordering},
 };
@@ -41,9 +43,7 @@ use hash_graph_types::{
     },
 };
 use hash_temporal_client::TemporalClient;
-use hashql_core::heap::Heap;
-use serde::{Deserialize as _, Serialize};
-use serde_json::value::RawValue as RawJsonvalue;
+use serde::Deserialize as _;
 use type_system::{
     knowledge::{
         Confidence, Entity, Property,
@@ -67,35 +67,33 @@ use type_system::{
         },
         value::{ValueMetadata, metadata::ValueProvenance},
     },
-    ontology::VersionedUrl,
     principal::actor::ActorType,
     provenance::{Location, OriginProvenance, SourceProvenance, SourceType},
 };
-use utoipa::{OpenApi, ToSchema};
 
-pub use crate::rest::entity_query_request::{
-    EntityQuery, EntityQueryOptions, QueryEntitiesRequest, QueryEntitySubgraphRequest,
-    SearchEntitiesRequest,
+use self::query::{
+    QueryEntitySubgraphResponse, query_entities, query_entity_subgraph,
+    request::{QueryEntitiesRequest, QueryEntitySubgraphRequest},
+    summarize_entities,
 };
 use crate::rest::{
-    ApiConfig, AuthenticatedUserHeader, InteractiveHeader, OpenApiQuery, QueryLogger,
-    entity_query_request::CompilationOptions,
+    ApiConfig, AuthenticatedUserHeader, OpenApiQuery, QueryLogger, SearchRequestError,
     json::Json,
+    resolve_limit,
     status::{BoxedResponse, report_to_response},
-    utoipa_typedef::subgraph::Subgraph,
 };
 
-#[derive(OpenApi)]
+#[derive(utoipa::OpenApi)]
 #[openapi(
     paths(
         create_entity,
         create_entities,
         validate_entity,
         has_permission_for_entities,
-        query_entities,
-        query_entity_subgraph,
+        self::query::query_entities,
+        self::query::query_entity_subgraph,
+        self::query::summarize_entities,
         search_entities,
-        summarize_entities,
         patch_entity,
         update_entity_embeddings,
         diff_entity,
@@ -122,7 +120,6 @@ use crate::rest::{
 
             HasPermissionForEntitiesParams,
 
-            EntityQueryOptions,
             QueryEntitiesRequest,
             QueryEntitySubgraphRequest,
             SearchEntitiesRequest,
@@ -408,84 +405,45 @@ where
         .map_err(report_to_response)
 }
 
-#[utoipa::path(
-    post,
-    path = "/entities/query",
-    request_body = QueryEntitiesRequest,
-    tag = "Entity",
-    params(
-        ("X-Authenticated-User-Actor-Id" = ActorEntityUuid, Header, description = "The ID of the actor which is used to authorize the request"),
-        ("Interactive" = Option<bool>, Header, description = "Whether the request is used interactively"),
-        ("after" = Option<String>, Query, description = "The cursor to start reading from"),
-        ("limit" = Option<usize>, Query, description = "The maximum number of entities to read"),
-    ),
-    responses(
-        (
-            status = 200,
-            content_type = "application/json",
-            body = QueryEntitiesResponse,
-            description = "A list of entities that satisfy the given query.",
-        ),
-        (status = 422, content_type = "text/plain", description = "Provided query is invalid"),
-        (status = 500, description = "Store error occurred"),
-    )
-)]
-async fn query_entities<S>(
-    AuthenticatedUserHeader(actor_id): AuthenticatedUserHeader,
-    InteractiveHeader(interactive): InteractiveHeader,
-    store_pool: Extension<Arc<S>>,
-    temporal_client: Extension<Option<Arc<TemporalClient>>>,
-    Extension(api_config): Extension<ApiConfig>,
-    mut query_logger: Option<Extension<QueryLogger>>,
-    Json(request): Json<Box<RawJsonvalue>>,
-) -> Result<Json<QueryEntitiesResponse<'static>>, BoxedResponse>
-where
-    S: StorePool + Send + Sync,
-{
-    if let Some(query_logger) = &mut query_logger {
-        query_logger.capture(actor_id, OpenApiQuery::GetEntities(&request));
+/// Request body for the entity embedding search endpoint.
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SearchEntitiesRequest {
+    pub embedding: Embedding<'static>,
+    pub maximum_semantic_distance: f64,
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub include_entity_types: bool,
+    #[serde(default)]
+    pub filter: SearchEntitiesFilter,
+}
+
+impl SearchEntitiesRequest {
+    /// Convert this request into [`SearchEntitiesParams`] with the given [`ApiConfig`].
+    ///
+    /// # Errors
+    ///
+    /// - [`InvalidSemanticDistance`] if the maximum semantic distance is invalid.
+    /// - [`LimitExceeded`] if the requested limit exceeds the configured maximum.
+    ///
+    /// [`InvalidSemanticDistance`]: SearchRequestError::InvalidSemanticDistance
+    /// [`LimitExceeded`]: SearchRequestError::LimitExceeded
+    pub(crate) fn into_params(
+        self,
+        config: ApiConfig,
+    ) -> Result<SearchEntitiesParams, Report<SearchRequestError>> {
+        Ok(SearchEntitiesParams {
+            embedding: self.embedding,
+            maximum_semantic_distance: SemanticDistance::try_from(self.maximum_semantic_distance)
+                .change_context(
+                SearchRequestError::InvalidSemanticDistance,
+            )?,
+            limit: resolve_limit(self.limit, config.query_entity_limit)
+                .change_context(SearchRequestError::LimitExceeded)?,
+            include_entity_types: self.include_entity_types,
+            filter: self.filter,
+        })
     }
-
-    let store = store_pool
-        .acquire(temporal_client.0)
-        .await
-        .map_err(report_to_response)?;
-
-    let request = QueryEntitiesRequest::deserialize(&*request)
-        .map_err(Report::from)
-        .attach(hash_status::StatusCode::InvalidArgument)
-        .map_err(report_to_response)?;
-
-    let (query, options) = request.into_parts();
-
-    // TODO: https://linear.app/hash/issue/H-5351/reuse-parts-between-compilation-units
-    let mut heap = Heap::uninitialized();
-
-    if matches!(query, EntityQuery::Query { .. }) {
-        // The heap is going to be used in the compilation of the query and therefore needs to be
-        // primed.
-        // Doing this in a separate step allows us to be allocation free when not using HashQL
-        // queries.
-        heap.prime();
-    }
-
-    let filter = query.compile(&heap, CompilationOptions { interactive })?;
-
-    let params = options
-        .into_params(filter, api_config)
-        .attach(hash_status::StatusCode::InvalidArgument)
-        .map_err(report_to_response)?;
-
-    let response = store
-        .query_entities(actor_id, params)
-        .await
-        .map(Json)
-        .map_err(report_to_response);
-
-    if let Some(query_logger) = &mut query_logger {
-        query_logger.send().await.map_err(report_to_response)?;
-    }
-    response
 }
 
 #[utoipa::path(
@@ -532,164 +490,6 @@ where
         .await
         .map(Json)
         .map_err(report_to_response)
-}
-
-#[derive(Serialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-struct QueryEntitySubgraphResponse<'r> {
-    subgraph: Subgraph,
-    #[serde(borrow)]
-    cursor: Option<EntityQueryCursor<'r>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    closed_multi_entity_types: Option<HashMap<VersionedUrl, ClosedMultiEntityTypeMap>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    definitions: Option<EntityTypeResolveDefinitions>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(nullable = false)]
-    entity_permissions: Option<HashMap<EntityId, EntityPermissions>>,
-}
-
-#[utoipa::path(
-    post,
-    path = "/entities/query/subgraph",
-    request_body = QueryEntitySubgraphRequest,
-    tag = "Entity",
-    params(
-        ("X-Authenticated-User-Actor-Id" = ActorEntityUuid, Header, description = "The ID of the actor which is used to authorize the request"),
-        ("Interactive" = Option<bool>, Header, description = "Whether the query is interactive"),
-        ("after" = Option<String>, Query, description = "The cursor to start reading from"),
-        ("limit" = Option<usize>, Query, description = "The maximum number of entities to read"),
-    ),
-    responses(
-        (
-            status = 200,
-            content_type = "application/json",
-            body = QueryEntitySubgraphResponse,
-            description = "A subgraph rooted at entities that satisfy the given query, each resolved to the requested depth.",
-        ),
-        (status = 422, content_type = "text/plain", description = "Provided query is invalid"),
-        (status = 500, description = "Store error occurred"),
-    )
-)]
-async fn query_entity_subgraph<S>(
-    AuthenticatedUserHeader(actor_id): AuthenticatedUserHeader,
-    InteractiveHeader(interactive): InteractiveHeader,
-    store_pool: Extension<Arc<S>>,
-    temporal_client: Extension<Option<Arc<TemporalClient>>>,
-    Extension(api_config): Extension<ApiConfig>,
-    mut query_logger: Option<Extension<QueryLogger>>,
-    Json(request): Json<serde_json::Value>,
-) -> Result<Json<QueryEntitySubgraphResponse<'static>>, BoxedResponse>
-where
-    S: StorePool + Send + Sync,
-{
-    if let Some(query_logger) = &mut query_logger {
-        query_logger.capture(actor_id, OpenApiQuery::GetEntitySubgraph(&request));
-    }
-
-    let store = store_pool
-        .acquire(temporal_client.0)
-        .await
-        .map_err(report_to_response)?;
-
-    let request = QueryEntitySubgraphRequest::deserialize(&request)
-        .map_err(Report::from)
-        .attach(hash_status::StatusCode::InvalidArgument)
-        .map_err(report_to_response)?;
-    let (query, options, traversal) = request.into_parts();
-
-    // TODO: https://linear.app/hash/issue/H-5351/reuse-parts-between-compilation-units
-    let mut heap = Heap::uninitialized();
-
-    if matches!(query, EntityQuery::Query { .. }) {
-        // The heap is going to be used in the compilation of the query and therefore needs to be
-        // primed.
-        // Doing this in a separate step allows us to be allocation free when not using HashQL
-        // queries.
-        heap.prime();
-    }
-
-    let filter = query.compile(&heap, CompilationOptions { interactive })?;
-
-    let params = options
-        .into_traversal_params(filter, traversal, api_config)
-        .attach(hash_status::StatusCode::InvalidArgument)
-        .map_err(report_to_response)?;
-
-    let response = store
-        .query_entity_subgraph(actor_id, params)
-        .await
-        .map(|response| {
-            Json(QueryEntitySubgraphResponse {
-                subgraph: response.subgraph.into(),
-                cursor: response.cursor.map(EntityQueryCursor::into_owned),
-                closed_multi_entity_types: response.closed_multi_entity_types,
-                definitions: response.definitions,
-                entity_permissions: response.entity_permissions,
-            })
-        })
-        .map_err(report_to_response);
-    if let Some(query_logger) = &mut query_logger {
-        query_logger.send().await.map_err(report_to_response)?;
-    }
-    response
-}
-
-#[utoipa::path(
-    post,
-    path = "/entities/query/summarize",
-    request_body = SummarizeEntitiesParams,
-    tag = "Entity",
-    params(
-        ("X-Authenticated-User-Actor-Id" = ActorEntityUuid, Header, description = "The ID of the actor which is used to authorize the request"),
-
-    ),
-    responses(
-        (
-            status = 200,
-            content_type = "application/json",
-            body = SummarizeEntitiesResponse,
-        ),
-        (status = 422, content_type = "text/plain", description = "Provided query is invalid"),
-        (status = 500, description = "Store error occurred"),
-    )
-)]
-async fn summarize_entities<S>(
-    AuthenticatedUserHeader(actor_id): AuthenticatedUserHeader,
-    store_pool: Extension<Arc<S>>,
-    temporal_client: Extension<Option<Arc<TemporalClient>>>,
-    mut query_logger: Option<Extension<QueryLogger>>,
-    Json(request): Json<serde_json::Value>,
-) -> Result<Json<SummarizeEntitiesResponse>, BoxedResponse>
-where
-    S: StorePool + Send + Sync,
-{
-    if let Some(query_logger) = &mut query_logger {
-        query_logger.capture(actor_id, OpenApiQuery::SummarizeEntities(&request));
-    }
-
-    let store = store_pool
-        .acquire(temporal_client.0)
-        .await
-        .map_err(report_to_response)?;
-
-    let response = store
-        .summarize_entities(
-            actor_id,
-            SummarizeEntitiesParams::deserialize(&request)
-                .map_err(Report::from)
-                .attach(hash_status::StatusCode::InvalidArgument)
-                .map_err(report_to_response)?,
-        )
-        .await
-        .map(Json)
-        .map_err(report_to_response);
-    if let Some(query_logger) = &mut query_logger {
-        query_logger.send().await.map_err(report_to_response)?;
-    }
-    response
 }
 
 #[utoipa::path(
