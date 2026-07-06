@@ -8715,14 +8715,17 @@
       },
       "SearchEntitiesRequest": {
         "type": "object",
-        "description": "Request body for the entity embedding search endpoint.",
+        "description": "Request body for the entity embedding search endpoint.\n\nExactly one of `embedding` or `semanticString` must be provided. `semanticString` is converted\ninto an embedding by the server, which requires an embedding client to be configured.",
         "required": [
-          "embedding",
           "maximumSemanticDistance"
         ],
         "properties": {
           "embedding": {
-            "$ref": "#/components/schemas/Embedding"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Embedding"
+              }
+            ]
           },
           "filter": {
             "$ref": "#/components/schemas/SearchEntitiesFilter"
@@ -8738,6 +8741,9 @@
           "maximumSemanticDistance": {
             "type": "number",
             "format": "double"
+          },
+          "semanticString": {
+            "type": "string"
           }
         },
         "additionalProperties": false
@@ -8765,14 +8771,17 @@
       },
       "SearchEntityTypesRequest": {
         "type": "object",
-        "description": "Request body for the entity type embedding search endpoint.",
+        "description": "Request body for the entity type embedding search endpoint.\n\nExactly one of `embedding` or `semanticString` must be provided. `semanticString` is converted\ninto an embedding by the server, which requires an embedding client to be configured.",
         "required": [
-          "embedding",
           "maximumSemanticDistance"
         ],
         "properties": {
           "embedding": {
-            "$ref": "#/components/schemas/Embedding"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Embedding"
+              }
+            ]
           },
           "limit": {
             "type": "integer",
@@ -8782,6 +8791,9 @@
           "maximumSemanticDistance": {
             "type": "number",
             "format": "double"
+          },
+          "semanticString": {
+            "type": "string"
           }
         },
         "additionalProperties": false

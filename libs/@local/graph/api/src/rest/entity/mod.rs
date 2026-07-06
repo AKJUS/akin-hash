@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use axum::{Extension, Router, routing::post};
 use error_stack::{Report, ResultExt as _};
 use hash_graph_authorization::policies::principal::actor::AuthenticatedActor;
+use hash_graph_embeddings::OpenAiEmbeddingClient;
 use hash_graph_postgres_store::store::error::{EntityDoesNotExist, RaceConditionOnUpdate};
 use hash_graph_store::{
     self,
@@ -79,7 +80,7 @@ use self::query::{
 use crate::rest::{
     ApiConfig, AuthenticatedUserHeader, OpenApiQuery, QueryLogger, SearchRequestError,
     json::Json,
-    resolve_limit,
+    resolve_limit, resolve_search_embedding,
     status::{BoxedResponse, report_to_response},
 };
 
@@ -406,10 +407,18 @@ where
 }
 
 /// Request body for the entity embedding search endpoint.
+///
+/// Exactly one of `embedding` or `semanticString` must be provided. `semanticString` is converted
+/// into an embedding by the server, which requires an embedding client to be configured.
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct SearchEntitiesRequest {
-    pub embedding: Embedding<'static>,
+    #[serde(default)]
+    #[schema(nullable = false)]
+    pub embedding: Option<Embedding<'static>>,
+    #[serde(default)]
+    #[schema(nullable = false)]
+    pub semantic_string: Option<String>,
     pub maximum_semantic_distance: f64,
     pub limit: Option<usize>,
     #[serde(default)]
@@ -419,27 +428,34 @@ pub(crate) struct SearchEntitiesRequest {
 }
 
 impl SearchEntitiesRequest {
-    /// Convert this request into [`SearchEntitiesParams`] with the given [`ApiConfig`].
+    /// Converts the request into [`SearchEntitiesParams`], resolving the query embedding.
     ///
     /// # Errors
     ///
-    /// - [`InvalidSemanticDistance`] if the maximum semantic distance is invalid.
-    /// - [`LimitExceeded`] if the requested limit exceeds the configured maximum.
-    ///
-    /// [`InvalidSemanticDistance`]: SearchRequestError::InvalidSemanticDistance
-    /// [`LimitExceeded`]: SearchRequestError::LimitExceeded
-    pub(crate) fn into_params(
+    /// Returns a [`SearchRequestError`] if the query embedding cannot be resolved, the maximum
+    /// semantic distance is invalid, or the requested limit exceeds the configured maximum.
+    pub(crate) async fn into_params(
         self,
         config: ApiConfig,
+        embedding_client: Option<&OpenAiEmbeddingClient>,
     ) -> Result<SearchEntitiesParams, Report<SearchRequestError>> {
+        // Validate the local fields before resolving the embedding so an invalid request does not
+        // spend an embedding-provider call.
+        let maximum_semantic_distance = SemanticDistance::try_from(self.maximum_semantic_distance)
+            .change_context(SearchRequestError::InvalidSemanticDistance)
+            .attach(hash_status::StatusCode::InvalidArgument)?;
+        let limit = resolve_limit(self.limit, config.query_entity_limit)
+            .change_context(SearchRequestError::LimitExceeded)
+            .attach(hash_status::StatusCode::InvalidArgument)?;
         Ok(SearchEntitiesParams {
-            embedding: self.embedding,
-            maximum_semantic_distance: SemanticDistance::try_from(self.maximum_semantic_distance)
-                .change_context(
-                SearchRequestError::InvalidSemanticDistance,
-            )?,
-            limit: resolve_limit(self.limit, config.query_entity_limit)
-                .change_context(SearchRequestError::LimitExceeded)?,
+            embedding: resolve_search_embedding(
+                self.embedding,
+                self.semantic_string,
+                embedding_client,
+            )
+            .await?,
+            maximum_semantic_distance,
+            limit,
             include_entity_types: self.include_entity_types,
             filter: self.filter,
         })
@@ -469,20 +485,21 @@ async fn search_entities<S>(
     AuthenticatedUserHeader(actor_id): AuthenticatedUserHeader,
     store_pool: Extension<Arc<S>>,
     temporal_client: Extension<Option<Arc<TemporalClient>>>,
+    embedding_client: Extension<Option<Arc<OpenAiEmbeddingClient>>>,
     Extension(api_config): Extension<ApiConfig>,
     Json(request): Json<SearchEntitiesRequest>,
 ) -> Result<Json<SearchEntitiesResponse>, BoxedResponse>
 where
     S: StorePool + Send + Sync,
 {
-    let store = store_pool
-        .acquire(temporal_client.0)
+    let params = request
+        .into_params(api_config, embedding_client.0.as_deref())
         .await
         .map_err(report_to_response)?;
 
-    let params = request
-        .into_params(api_config)
-        .attach(hash_status::StatusCode::InvalidArgument)
+    let store = store_pool
+        .acquire(temporal_client.0)
+        .await
         .map_err(report_to_response)?;
 
     store
