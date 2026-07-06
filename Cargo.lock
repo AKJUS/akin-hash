@@ -4170,7 +4170,6 @@ name = "hashql-eval"
 version = "0.0.0"
 dependencies = [
  "bytes",
- "derive_more",
  "error-stack",
  "futures-lite",
  "hash-graph-authorization",
@@ -4197,7 +4196,6 @@ dependencies = [
  "testcontainers-modules",
  "tokio",
  "tokio-postgres",
- "tokio-util",
  "type-system",
  "url",
  "uuid",
