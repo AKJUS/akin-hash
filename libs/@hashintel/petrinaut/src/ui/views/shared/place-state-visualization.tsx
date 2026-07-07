@@ -11,7 +11,7 @@ import { SimulationContext } from "../../../react/simulation/context";
 import { compileVisualizer } from "../../lib/compile-visualizer";
 import { VisualizerErrorBoundary } from "../Editor/panels/PropertiesPanel/place-properties/subviews/place-visualizer/visualizer-error-boundary";
 
-import type { Color, Place } from "@hashintel/petrinaut-core";
+import type { Color, Place, TokenRecord } from "@hashintel/petrinaut-core";
 
 const messageStyle = css({
   padding: "[12px]",
@@ -65,43 +65,25 @@ export const PlaceStateVisualization: React.FC<
     return <div className={messageStyle}>Place has no type set</div>;
   }
 
-  const dimensions = placeType.elements.length;
-  const tokens: Record<string, number>[] = [];
+  const tokens: TokenRecord[] = [];
   let parameters: Record<string, number | boolean> = {};
 
   if (totalFrames > 0 && currentFrameReader) {
-    const placeTokenValues = currentFrameReader.getPlaceTokenValues(place.id);
-    if (!placeTokenValues) {
-      return <div className={messageStyle}>Place not found in frame</div>;
-    }
-
-    const tokenValues = Array.from(placeTokenValues.values);
-
-    for (
-      let tokenIndex = 0;
-      tokenIndex < placeTokenValues.count;
-      tokenIndex++
-    ) {
-      const token: Record<string, number> = {};
-      for (let colIndex = 0; colIndex < dimensions; colIndex++) {
-        const dimensionName = placeType.elements[colIndex]!.name;
-        token[dimensionName] =
-          tokenValues[tokenIndex * dimensions + colIndex] ?? 0;
-      }
-      tokens.push(token);
-    }
-
+    tokens.push(...currentFrameReader.getPlaceTokens(place, placeType));
     parameters = mergeParameterValues(parameterValues, defaultParameterValues);
   } else {
     const marking = initialMarking[place.id];
     if (Array.isArray(marking) && marking.length > 0) {
-      for (let tokenIndex = 0; tokenIndex < marking.length; tokenIndex++) {
-        const token: Record<string, number> = {};
-        for (let colIndex = 0; colIndex < dimensions; colIndex++) {
-          const dimensionName = placeType.elements[colIndex]!.name;
-          token[dimensionName] = marking[tokenIndex]?.[dimensionName] ?? 0;
+      // Stored records may predate schema edits (added dimensions), so fill
+      // missing keys with each element's default — visualizer code should
+      // see 0/false, not undefined.
+      for (const token of marking) {
+        const filled: TokenRecord = {};
+        for (const element of placeType.elements) {
+          filled[element.name] =
+            token[element.name] ?? (element.type === "boolean" ? false : 0);
         }
-        tokens.push(token);
+        tokens.push(filled);
       }
     }
 

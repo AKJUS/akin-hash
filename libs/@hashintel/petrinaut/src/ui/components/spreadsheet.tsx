@@ -5,12 +5,15 @@ import { css, cva } from "@hashintel/ds-helpers/css";
 export interface SpreadsheetColumn {
   id: string;
   name: string;
+  type?: "real" | "integer" | "boolean";
 }
+
+export type SpreadsheetCellValue = number | boolean;
 
 export interface SpreadsheetProps {
   columns: SpreadsheetColumn[];
-  data: number[][];
-  onChange?: (data: number[][]) => void;
+  data: SpreadsheetCellValue[][];
+  onChange?: (data: SpreadsheetCellValue[][]) => void;
 }
 
 type CellPosition = {
@@ -183,6 +186,48 @@ const cellButtonStyle = cva({
   },
 });
 
+const booleanCellStyle = css({
+  margin: "0",
+});
+
+const getDefaultCellValue = (
+  column: SpreadsheetColumn | undefined,
+): SpreadsheetCellValue => {
+  switch (column?.type) {
+    case "boolean":
+      return false;
+    case "integer":
+    case "real":
+    default:
+      return 0;
+  }
+};
+
+const formatCellValue = (value: SpreadsheetCellValue): string => String(value);
+
+// Pasting "Infinity" or overflowing notation must not leak non-finite
+// numbers into stored state (the runtime codecs reject them later).
+const parseFiniteNumber = (rawValue: string): number => {
+  const parsed = Number.parseFloat(rawValue);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+const parseCellValue = (
+  column: SpreadsheetColumn | undefined,
+  rawValue: string,
+): SpreadsheetCellValue => {
+  switch (column?.type) {
+    case "boolean": {
+      const normalized = rawValue.trim().toLowerCase();
+      return normalized === "true" || normalized === "1";
+    }
+    case "integer":
+      return Math.round(parseFiniteNumber(rawValue));
+    case "real":
+    default:
+      return parseFiniteNumber(rawValue);
+  }
+};
+
 export const Spreadsheet: React.FC<SpreadsheetProps> = ({
   columns,
   data,
@@ -205,7 +250,7 @@ export const Spreadsheet: React.FC<SpreadsheetProps> = ({
     null,
   );
   const [editingValue, setEditingValue] = useState<string>("");
-  const cellRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const cellRefs = useRef<Map<string, HTMLElement>>(new Map());
   const inputRef = useRef<HTMLInputElement>(null);
 
   const selectedRow =
@@ -221,12 +266,19 @@ export const Spreadsheet: React.FC<SpreadsheetProps> = ({
       ? editingCellState
       : null;
 
-  const updateCell = (row: number, col: number, value: number) => {
-    let newData: number[][];
+  const createEmptyRow = (): SpreadsheetCellValue[] =>
+    columns.map((column) => getDefaultCellValue(column));
+
+  const updateCell = (
+    row: number,
+    col: number,
+    value: SpreadsheetCellValue,
+  ) => {
+    let newData: SpreadsheetCellValue[][];
 
     // If editing the phantom row (last row), create a new actual row
     if (row === tableData.length) {
-      newData = [...tableData, Array(colCount).fill(0) as number[]];
+      newData = [...tableData, createEmptyRow()];
       if (newData[row]) {
         newData[row][col] = value;
       }
@@ -242,8 +294,16 @@ export const Spreadsheet: React.FC<SpreadsheetProps> = ({
     onChange?.(newData);
   };
 
+  const toggleBooleanCell = (row: number, col: number) => {
+    const currentValue =
+      tableData[row]?.[col] ?? getDefaultCellValue(columns[col]);
+    // Truthiness, not `!== true`: a numerically-encoded 1 must toggle off
+    // like `true` does.
+    updateCell(row, col, !currentValue);
+  };
+
   const removeRow = (rowIndex: number) => {
-    const newData: number[][] = tableData.filter(
+    const newData: SpreadsheetCellValue[][] = tableData.filter(
       (_, index) => index !== rowIndex,
     );
     onChange?.(newData);
@@ -300,7 +360,7 @@ export const Spreadsheet: React.FC<SpreadsheetProps> = ({
     if (editingCell && editingCell.row === row && editingCell.col === col) {
       if (event.key === "Enter") {
         event.preventDefault();
-        const value = Number.parseFloat(editingValue) || 0;
+        const value = parseCellValue(columns[col], editingValue);
         updateCell(row, col, value);
         setEditingCell(null);
         setEditingValue("");
@@ -322,7 +382,7 @@ export const Spreadsheet: React.FC<SpreadsheetProps> = ({
         }
       } else if (event.key === "Tab") {
         event.preventDefault();
-        const value = Number.parseFloat(editingValue) || 0;
+        const value = parseCellValue(columns[col], editingValue);
         updateCell(row, col, value);
         setEditingCell(null);
         setEditingValue("");
@@ -368,6 +428,42 @@ export const Spreadsheet: React.FC<SpreadsheetProps> = ({
         }, 0);
       }
       return;
+    }
+
+    if (columns[col]?.type === "boolean") {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        toggleBooleanCell(row, col);
+        setSelectedRow(null);
+        return;
+      }
+
+      if (event.key === "Delete" || event.key === "Backspace") {
+        event.preventDefault();
+        updateCell(row, col, false);
+        setSelectedRow(null);
+        return;
+      }
+
+      const normalizedKey = event.key.toLowerCase();
+      if (normalizedKey === "t" || normalizedKey === "1") {
+        event.preventDefault();
+        updateCell(row, col, true);
+        setSelectedRow(null);
+        return;
+      }
+      if (normalizedKey === "f" || normalizedKey === "0") {
+        event.preventDefault();
+        updateCell(row, col, false);
+        setSelectedRow(null);
+        return;
+      }
+      // Swallow any other printable key — boolean cells never open the text
+      // editor (but keep shortcuts like Cmd+C working).
+      if (event.key.length === 1 && !event.metaKey && !event.ctrlKey) {
+        event.preventDefault();
+        return;
+      }
     }
 
     // Navigation keys when not editing
@@ -448,21 +544,25 @@ export const Spreadsheet: React.FC<SpreadsheetProps> = ({
     } else if (event.key === "Enter") {
       event.preventDefault();
       setEditingCell({ row, col });
-      setEditingValue(String(tableData[row]?.[col] ?? 0));
+      setEditingValue(
+        formatCellValue(
+          tableData[row]?.[col] ?? getDefaultCellValue(columns[col]),
+        ),
+      );
       setTimeout(() => inputRef.current?.focus(), 0);
     } else if (event.key === "Delete") {
       event.preventDefault();
       if (selectedRow !== null) {
         removeRow(selectedRow);
       } else {
-        updateCell(row, col, 0);
+        updateCell(row, col, getDefaultCellValue(columns[col]));
         setEditingCell({ row, col });
         setEditingValue("");
         setTimeout(() => inputRef.current?.focus(), 0);
       }
     } else if (event.key === "Backspace") {
       event.preventDefault();
-      updateCell(row, col, 0);
+      updateCell(row, col, getDefaultCellValue(columns[col]));
       setEditingCell({ row, col });
       setEditingValue("");
       setTimeout(() => inputRef.current?.focus(), 0);
@@ -573,14 +673,14 @@ export const Spreadsheet: React.FC<SpreadsheetProps> = ({
             {(() => {
               const displayRows = isReadOnly
                 ? tableData
-                : [...tableData, Array(colCount).fill(0) as number[]];
+                : [...tableData, createEmptyRow()];
               return displayRows.map((row, rowIndex) => {
                 const isPhantomRow =
                   !isReadOnly && rowIndex === tableData.length;
                 return (
                   <tr
                     // eslint-disable-next-line react/no-array-index-key -- Row position is stable and meaningful
-                    key={`row-${rowIndex}-${row.join("-")}`}
+                    key={`row-${rowIndex}-${row.map(formatCellValue).join("-")}`}
                     className={rowStyle({
                       isSelected: selectedRow === rowIndex,
                       isSticky: isPhantomRow,
@@ -617,12 +717,17 @@ export const Spreadsheet: React.FC<SpreadsheetProps> = ({
                         >
                           {isReadOnly ? (
                             <div className={readOnlyCellStyle}>
-                              {isPhantomRow ? "" : value}
+                              {isPhantomRow ? "" : formatCellValue(value)}
                             </div>
                           ) : isEditing ? (
                             <input
                               ref={inputRef}
                               type="number"
+                              step={
+                                columns[colIndex]?.type === "integer"
+                                  ? 1
+                                  : "any"
+                              }
                               value={editingValue}
                               onChange={(event) =>
                                 setEditingValue(event.target.value)
@@ -631,14 +736,61 @@ export const Spreadsheet: React.FC<SpreadsheetProps> = ({
                                 handleKeyDown(event, rowIndex, colIndex)
                               }
                               onBlur={() => {
-                                const val =
-                                  Number.parseFloat(editingValue) || 0;
+                                const val = parseCellValue(
+                                  columns[colIndex],
+                                  editingValue,
+                                );
                                 updateCell(rowIndex, colIndex, val);
                                 setEditingCell(null);
                                 setEditingValue("");
                               }}
                               className={editingInputStyle}
                             />
+                          ) : columns[colIndex]?.type === "boolean" ? (
+                            <div
+                              ref={(el) => {
+                                if (el) {
+                                  cellRefs.current.set(
+                                    `${rowIndex}-${colIndex}`,
+                                    el,
+                                  );
+                                } else {
+                                  cellRefs.current.delete(
+                                    `${rowIndex}-${colIndex}`,
+                                  );
+                                }
+                              }}
+                              role="checkbox"
+                              aria-checked={Boolean(value)}
+                              aria-label={columns[colIndex].name}
+                              tabIndex={0}
+                              onFocus={() => {
+                                setFocusedCell({
+                                  row: rowIndex,
+                                  col: colIndex,
+                                });
+                                setSelectedRow(null);
+                              }}
+                              onKeyDown={(event) =>
+                                handleKeyDown(event, rowIndex, colIndex)
+                              }
+                              onClick={() =>
+                                toggleBooleanCell(rowIndex, colIndex)
+                              }
+                              className={cellButtonStyle({ isFocused })}
+                            >
+                              {/* Visual only — the wrapping div owns the
+                                  checkbox role, so hide this from AT to
+                                  avoid double announcement. */}
+                              <input
+                                type="checkbox"
+                                checked={Boolean(value)}
+                                readOnly
+                                tabIndex={-1}
+                                aria-hidden
+                                className={booleanCellStyle}
+                              />
+                            </div>
                           ) : (
                             <div
                               ref={(el) => {
@@ -667,7 +819,7 @@ export const Spreadsheet: React.FC<SpreadsheetProps> = ({
                               }
                               className={cellButtonStyle({ isFocused })}
                             >
-                              {isPhantomRow ? "" : value}
+                              {isPhantomRow ? "" : formatCellValue(value)}
                             </div>
                           )}
                         </td>

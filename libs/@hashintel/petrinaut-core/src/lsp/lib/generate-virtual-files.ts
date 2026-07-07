@@ -9,6 +9,8 @@ import {
 import { getItemFilePath } from "./file-paths";
 
 import type {
+  Color,
+  ColorElementType,
   InputArc,
   OutputArc,
   SDCPN,
@@ -28,8 +30,56 @@ function sanitizeColorId(colorId: string): string {
 /**
  * Maps SDCPN element types to TypeScript types
  */
-function toTsType(type: "real" | "integer" | "boolean" | "ratio"): string {
-  return type === "boolean" ? "boolean" : "number";
+function toTsType(type: ColorElementType | "ratio"): string {
+  if (type === "boolean") {
+    return "boolean";
+  }
+  return "number";
+}
+
+/**
+ * Dynamics derivatives only apply to continuous (real) attributes. Discrete
+ * elements are typed `?: never` rather than omitted: user code returns
+ * derivatives through `tokens.map(...)`, whose result is not a fresh object
+ * literal, so excess property checks would not reject extra keys — `never`
+ * rejects them in any assignment.
+ */
+function toDynamicsDerivativeType(color: Color): string {
+  const properties = color.elements
+    .map((element) =>
+      element.type === "real"
+        ? `  ${element.name}?: number;`
+        : `  ${element.name}?: never;`,
+    )
+    .join("\n");
+
+  return properties.length > 0
+    ? `{\n${properties}\n}`
+    : "Record<string, never>";
+}
+
+/**
+ * Kernel output token type when stochasticity is enabled. Only continuous
+ * (`real`) attributes may be produced as a `Distribution`; discrete
+ * attributes (`integer`, `boolean`) must be plain values — the generic
+ * `Probabilistic<T>` mapped type could not distinguish integer from real
+ * (both are `number`), so the type is generated per element instead.
+ */
+function toStochasticOutputTokenType(color: Color): string {
+  const properties = color.elements
+    .map(
+      (element) =>
+        `  ${element.name}: ${
+          element.type === "real"
+            ? "number | Distribution"
+            : toTsType(element.type)
+        };`,
+    )
+    .join("\n");
+
+  return properties.length > 0
+    ? `{\n${properties}\n}`
+    : "Record<string, never>";
 }
 
 /**
@@ -87,7 +137,6 @@ export function generateVirtualFiles(
     content: extensions.stochasticity
       ? [
           `type Distribution = { map(fn: (value: number) => number): Distribution };`,
-          `type Probabilistic<T> = { [K in keyof T]: T[K] extends number ? number | Distribution : T[K] };`,
           `declare namespace Distribution {`,
           `  function Gaussian(mean: number, deviation: number): Distribution;`,
           `  function Uniform(min: number, max: number): Distribution;`,
@@ -138,6 +187,7 @@ export function generateVirtualFiles(
     ? sdcpn.differentialEquations
     : []) {
     const sanitizedColorId = de.colorId ? sanitizeColorId(de.colorId) : null;
+    const color = de.colorId ? colorById.get(de.colorId) : undefined;
     const deDefsPath = getItemFilePath("differential-equation-defs", {
       id: de.id,
     });
@@ -162,7 +212,10 @@ export function generateVirtualFiles(
         sanitizedColorId
           ? `type Tokens = Array<Color_${sanitizedColorId}>;`
           : `type Tokens = Array<number>;`,
-        `export type Dynamics = (fn: (tokens: Tokens, parameters: Parameters) => Tokens) => void;`,
+        color
+          ? `type Derivative = ${toDynamicsDerivativeType(color)};`
+          : `type Derivative = Record<string, never>;`,
+        `export type Dynamics = (fn: (tokens: Tokens, parameters: Parameters) => Derivative[]) => void;`,
       ].join("\n"),
     });
 
@@ -240,6 +293,8 @@ export function generateVirtualFiles(
     // Build output type: { [placeName]: [Token, Token, ...] } based on output arcs.
     const outputTypeImports: string[] = [];
     const outputTypeProperties: string[] = [];
+    // Per-colour stochastic output token types (Distribution on real only).
+    const outputTokenTypeAliases = new Map<string, string>();
 
     for (const arc of transition.outputArcs) {
       const place = resolveArcPlace(arc);
@@ -266,10 +321,19 @@ export function generateVirtualFiles(
       const tokenTuple = Array.from({ length: arc.weight })
         .fill(
           extensions.stochasticity
-            ? `Probabilistic<Color_${sanitizedColorId}>`
+            ? `Output_${sanitizedColorId}`
             : `Color_${sanitizedColorId}`,
         )
         .join(", ");
+      if (
+        extensions.stochasticity &&
+        !outputTokenTypeAliases.has(sanitizedColorId)
+      ) {
+        outputTokenTypeAliases.set(
+          sanitizedColorId,
+          `type Output_${sanitizedColorId} = ${toStochasticOutputTokenType(color)};`,
+        );
+      }
       const placeDisplayName = getPlaceDisplayNameForArc(arc, sdcpn);
       outputTypeProperties.push(`  "${placeDisplayName}": [${tokenTuple}];`);
     }
@@ -319,6 +383,7 @@ export function generateVirtualFiles(
           `import type { Parameters } from "${parametersDefsPath}";`,
           ...allImports,
           ``,
+          ...outputTokenTypeAliases.values(),
           `export type Input = ${inputType};`,
           `export type Output = ${outputType};`,
           `export type TransitionKernel = (fn: (input: Input, parameters: Parameters) => Output) => void;`,
@@ -521,7 +586,9 @@ export function generateMetricSessionFiles(
   const { sessionId } = session;
 
   // Build per-place state types. Colored places expose typed `tokens` arrays;
-  // uncolored places fall back to `Record<string, number>[]`.
+  // uncolored places (and places whose color can't be resolved) always yield
+  // `[]` at runtime, so their element type is `never` — indexing into them is
+  // a type error instead of a phantom token record.
   const colorById = new Map(sdcpn.types.map((c) => [c.id, c]));
   const placeStateImports: string[] = [];
   const placeStateProperties: string[] = [];
@@ -541,10 +608,10 @@ export function generateMetricSessionFiles(
         }
         tokensType = `Color_${sanitized}[]`;
       } else {
-        tokensType = "Record<string, number>[]";
+        tokensType = "never[]";
       }
     } else {
-      tokensType = "Record<string, number>[]";
+      tokensType = "never[]";
     }
     placeStateProperties.push(
       `  "${place.name}": { count: number; tokens: ${tokensType} };`,
@@ -554,7 +621,7 @@ export function generateMetricSessionFiles(
   const placesType =
     placeStateProperties.length > 0
       ? `{\n${placeStateProperties.join("\n")}\n}`
-      : "Record<string, { count: number; tokens: Record<string, number>[] }>";
+      : "Record<string, { count: number; tokens: Record<string, number | boolean>[] }>";
 
   // defs file (kept separate so updates only invalidate code on real changes)
   const defsPath = getItemFilePath("metric-session-defs", { sessionId });
