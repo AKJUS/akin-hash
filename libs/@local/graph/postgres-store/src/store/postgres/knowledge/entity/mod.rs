@@ -54,8 +54,7 @@ use hash_graph_temporal_versioning::{
     TransactionTime,
 };
 use hash_graph_types::{
-    Embedding,
-    knowledge::{entity::EntityEmbedding, property::visitor::EntityVisitor as _},
+    knowledge::property::visitor::EntityVisitor as _,
     ontology::{DataTypeLookup, OntologyTypeProvider},
 };
 use hash_graph_validation::{EntityPreprocessor, Validate as _};
@@ -84,7 +83,7 @@ use type_system::{
         entity_type::{ClosedEntityType, ClosedMultiEntityType, EntityTypeUuid},
         id::{OntologyTypeUuid, VersionedUrl},
     },
-    principal::{actor::ActorEntityUuid, actor_group::WebId},
+    principal::actor::ActorEntityUuid,
 };
 use uuid::Uuid;
 
@@ -99,11 +98,10 @@ use crate::store::{
             summary::{Deduplication, EntitySummaryQuery},
         },
         query::{
-            Distinctness, InsertStatementBuilder, PostgresRecord as _, PostgresSorting as _,
-            SelectCompiler, Table,
+            Distinctness, PostgresRecord as _, PostgresSorting as _, SelectCompiler, bulk_insert,
             rows::{
                 EntityDraftRow, EntityEdgeRow, EntityEditionRow, EntityIdRow, EntityIsOfTypeRow,
-                EntityTemporalMetadataRow,
+                EntityTemporalMetadataRow, PostgresRow as _,
             },
         },
     },
@@ -1004,22 +1002,47 @@ where
         }
 
         let insertions = [
-            InsertStatementBuilder::from_rows(Table::EntityIds, &entity_id_rows),
-            InsertStatementBuilder::from_rows(Table::EntityDrafts, &entity_draft_rows),
-            InsertStatementBuilder::from_rows(Table::EntityEditions, &entity_edition_rows),
-            InsertStatementBuilder::from_rows(
-                Table::EntityTemporalMetadata,
-                &entity_temporal_metadata_rows,
+            (
+                EntityIdRow::table(),
+                bulk_insert().rows(&entity_id_rows).compile(),
+                entity_id_rows.len(),
             ),
-            InsertStatementBuilder::from_rows(Table::EntityIsOfType, &entity_is_of_type_rows),
-            InsertStatementBuilder::from_rows(Table::EntityEdge, &entity_edge_rows),
+            (
+                EntityDraftRow::table(),
+                bulk_insert().rows(&entity_draft_rows).compile(),
+                entity_draft_rows.len(),
+            ),
+            (
+                EntityEditionRow::table(),
+                bulk_insert().rows(&entity_edition_rows).compile(),
+                entity_edition_rows.len(),
+            ),
+            (
+                EntityTemporalMetadataRow::table(),
+                bulk_insert().rows(&entity_temporal_metadata_rows).compile(),
+                entity_temporal_metadata_rows.len(),
+            ),
+            (
+                EntityIsOfTypeRow::table(),
+                bulk_insert().rows(&entity_is_of_type_rows).compile(),
+                entity_is_of_type_rows.len(),
+            ),
+            (
+                EntityEdgeRow::table(),
+                bulk_insert().rows(&entity_edge_rows).compile(),
+                entity_edge_rows.len(),
+            ),
         ];
 
-        for statement in insertions {
-            let (statement, parameters) = statement.compile();
-            transaction
+        for (table, (statement, parameters), expected_rows) in &insertions {
+            let inserted_rows = transaction
                 .as_client()
-                .query(&statement, &parameters)
+                .execute_raw(
+                    statement,
+                    parameters
+                        .iter()
+                        .map(|parameter| &**parameter as &(dyn ToSql + Sync)),
+                )
                 .instrument(tracing::info_span!(
                     "INSERT",
                     otel.kind = "client",
@@ -1029,13 +1052,24 @@ where
                 ))
                 .await
                 .change_context(InsertionError)?;
+            if inserted_rows != *expected_rows as u64 {
+                return Err(Report::new(InsertionError).attach(format!(
+                    "bulk insert into `{table}` affected {inserted_rows} rows but {expected_rows} \
+                     were provided",
+                    table = table.as_str(),
+                )));
+            }
         }
 
         transaction
             .as_client()
             .query(
                 "
-                    INSERT INTO entity_is_of_type
+                    INSERT INTO entity_is_of_type (
+                        entity_edition_id,
+                        entity_type_ontology_id,
+                        inheritance_depth
+                    )
                     SELECT entity_edition_id,
                         target_entity_type_ontology_id AS entity_type_ontology_id,
                         MIN(entity_type_inherits_from.depth + 1) AS inheritance_depth
@@ -2285,30 +2319,12 @@ where
         _: ActorEntityUuid,
         params: UpdateEntityEmbeddingsParams<'_>,
     ) -> Result<(), Report<UpdateError>> {
-        #[derive(Debug, ToSql)]
-        #[postgres(name = "entity_embeddings")]
-        pub struct EntityEmbeddingsRow<'a> {
-            web_id: WebId,
-            entity_uuid: EntityUuid,
-            draft_id: Option<DraftId>,
-            property: Option<String>,
-            embedding: Embedding<'a>,
-            updated_at_transaction_time: Timestamp<TransactionTime>,
-            updated_at_decision_time: Timestamp<DecisionTime>,
+        let mut properties = Vec::with_capacity(params.embeddings.len());
+        let mut embeddings = Vec::with_capacity(params.embeddings.len());
+        for embedding in params.embeddings {
+            properties.push(embedding.property.as_ref().map(ToString::to_string));
+            embeddings.push(embedding.embedding);
         }
-        let entity_embeddings = params
-            .embeddings
-            .into_iter()
-            .map(|embedding: EntityEmbedding<'_>| EntityEmbeddingsRow {
-                web_id: params.entity_id.web_id,
-                entity_uuid: params.entity_id.entity_uuid,
-                draft_id: params.entity_id.draft_id,
-                property: embedding.property.as_ref().map(ToString::to_string),
-                embedding: embedding.embedding,
-                updated_at_transaction_time: params.updated_at_transaction_time,
-                updated_at_decision_time: params.updated_at_decision_time,
-            })
-            .collect::<Vec<_>>();
 
         // TODO: Add permission to allow updating embeddings
         //   see https://linear.app/hash/issue/H-1870
@@ -2392,8 +2408,24 @@ where
         self.as_client()
             .query(
                 "
-                    INSERT INTO entity_embeddings
-                    SELECT * FROM UNNEST($1::entity_embeddings[])
+                    INSERT INTO entity_embeddings (
+                        web_id,
+                        entity_uuid,
+                        draft_id,
+                        property,
+                        embedding,
+                        updated_at_transaction_time,
+                        updated_at_decision_time
+                    )
+                    SELECT
+                        $1::uuid,
+                        $2::uuid,
+                        $3::uuid,
+                        property,
+                        embedding,
+                        $6::timestamptz,
+                        $7::timestamptz
+                    FROM unnest($4::text[], $5::vector[]) AS embeddings(property, embedding)
                     ON CONFLICT (web_id, entity_uuid, property) DO UPDATE
                     SET
                         embedding = EXCLUDED.embedding,
@@ -2404,7 +2436,15 @@ where
                     AND entity_embeddings.updated_at_decision_time <= \
                  EXCLUDED.updated_at_decision_time;
                 ",
-                &[&entity_embeddings],
+                &[
+                    &params.entity_id.web_id,
+                    &params.entity_id.entity_uuid,
+                    &params.entity_id.draft_id,
+                    &properties,
+                    &embeddings,
+                    &params.updated_at_transaction_time,
+                    &params.updated_at_decision_time,
+                ],
             )
             .instrument(tracing::info_span!(
                 "INSERT",
@@ -2430,7 +2470,11 @@ where
                 "
                     DELETE FROM entity_is_of_type WHERE inheritance_depth > 0;
 
-                    INSERT INTO entity_is_of_type
+                    INSERT INTO entity_is_of_type (
+                        entity_edition_id,
+                        entity_type_ontology_id,
+                        inheritance_depth
+                    )
                     SELECT entity_edition_id,
                            target_entity_type_ontology_id AS entity_type_ontology_id,
                            MIN(entity_type_inherits_from.depth + 1) AS inheritance_depth
@@ -2726,7 +2770,11 @@ impl PostgresStore<tokio_postgres::Transaction<'_>> {
         self.as_client()
             .query(
                 "
-                    INSERT INTO entity_is_of_type
+                    INSERT INTO entity_is_of_type (
+                        entity_edition_id,
+                        entity_type_ontology_id,
+                        inheritance_depth
+                    )
                     SELECT entity_edition_id,
                            target_entity_type_ontology_id AS entity_type_ontology_id,
                            MIN(entity_type_inherits_from.depth + 1) AS inheritance_depth
