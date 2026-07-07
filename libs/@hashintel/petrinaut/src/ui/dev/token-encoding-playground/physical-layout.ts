@@ -4,10 +4,12 @@ import {
   createTokenRegionViews,
   encodeTokenToBytes,
   readTokenRecord,
+  StringPool,
 } from "@hashintel/petrinaut-core";
 
 import type {
   ColorElementType,
+  StringPoolReader,
   TokenLayoutField,
   TokenRecord,
   TokenSlotLayout,
@@ -50,25 +52,29 @@ export type EncodedToken = {
 export function decodeToken(
   layout: TokenSlotLayout,
   buffer: ArrayBuffer,
+  stringPool?: StringPoolReader,
 ): TokenRecord {
   if (layout.strideBytes === 0) {
     return {};
   }
-  const { f64, u8 } = createTokenRegionViews(buffer, 0, layout.strideBytes);
-  return readTokenRecord(layout, f64, u8, 0);
+  const views = createTokenRegionViews(buffer, 0, layout.strideBytes);
+  return readTokenRecord(layout, views, 0, stringPool);
 }
 
 /**
  * Encodes one token record into a fresh buffer using the real product codec
  * (`encodeTokenToBytes`) for value coercion, then decodes it back so callers
  * can show the round-trip. All multi-byte values are little-endian, matching
- * the platform layout of the engine's typed-array views.
+ * the platform layout of the engine's typed-array views. String fields
+ * intern into a throwaway per-encode `StringPool` — in the product, the pool
+ * lives on the simulation and persists for the whole run.
  */
 export function encodeToken(
   layout: TokenSlotLayout,
   record: Record<string, unknown>,
 ): EncodedToken {
-  const bytes = encodeTokenToBytes(layout, record, "Token");
+  const stringPool = new StringPool();
+  const bytes = encodeTokenToBytes(layout, record, "Token", stringPool);
   const buffer = bytes.buffer as ArrayBuffer;
 
   const stored: TokenRecord = {};
@@ -80,13 +86,15 @@ export function encodeToken(
     );
   }
 
-  return { buffer, stored, decoded: decodeToken(layout, buffer) };
+  return { buffer, stored, decoded: decodeToken(layout, buffer, stringPool) };
 }
 
 /**
  * Returns one field's bits most-significant first (the "logical" reading
  * order: for f64 that is sign, exponent, mantissa). Multi-byte values are
- * stored little-endian, so the byte walk is reversed.
+ * stored little-endian, so the byte walk is reversed. For 16-byte `u64x2`
+ * uuid fields (hi lane stored at +8) the reversal starts with the hi lane's
+ * most-significant byte, i.e. the logical 128-bit MSB.
  */
 export function getFieldBits(
   buffer: ArrayBuffer,

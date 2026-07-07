@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { css, cva } from "@hashintel/ds-helpers/css";
+import { formatUuid } from "@hashintel/petrinaut-core";
 
 import { f64BitPart } from "./physical-layout";
 
@@ -35,6 +36,8 @@ const bitLightness = (
   field: TokenLayoutField,
   msbFirstIndex: number,
 ): number => {
+  // Only f64 fields get IEEE-754 anatomy shading; u8 and u64x2 (uuid) fields
+  // are plain integers, rendered with one uniform lightness.
   if (field.kind !== "f64") {
     return 78;
   }
@@ -100,7 +103,10 @@ function buildSlotGroups(
           const msbFirstIndex = size * 8 - 1 - lsbFirstIndex;
           bits.push({ value, lightness: bitLightness(field, msbFirstIndex) });
         }
-        return { label: `b${byteIndex}`, bits };
+        // uuid fields are two 64-bit lanes: lo at the field offset, hi at +8.
+        const lane =
+          field.kind === "u64x2" ? (byteWithinField < 8 ? " lo" : " hi") : "";
+        return { label: `b${byteIndex}${lane}`, bits };
       }),
     });
   }
@@ -196,7 +202,7 @@ const byteRowStyle = css({
 });
 
 const byteLabelStyle = css({
-  width: "[26px]",
+  width: "[44px]",
   textAlign: "right",
   fontFamily: "mono",
   fontSize: "[9px]",
@@ -267,7 +273,8 @@ const formatValue = (value: unknown): string => {
     return Object.is(value, -0) ? "-0" : String(value);
   }
   if (typeof value === "bigint") {
-    return `${value}n`;
+    // uuid values are bigints at runtime; show the canonical string form.
+    return formatUuid(value);
   }
   if (value === undefined) {
     return "undefined";
@@ -283,6 +290,10 @@ const formatValue = (value: unknown): string => {
     return String(value);
   }
 };
+
+/** Pool reference stored in a `u64` (string) field — IDs are small integers. */
+const stringPoolId = (buffer: ArrayBuffer, field: TokenLayoutField): number =>
+  Number(new BigUint64Array(buffer, field.byteOffset, 1)[0] ?? 0n);
 
 const fieldHex = (buffer: ArrayBuffer, field: TokenLayoutField): string => {
   const bytes = new Uint8Array(buffer, field.byteOffset, field.byteSize);
@@ -445,13 +456,23 @@ export const TokenMemoryView: React.FC<TokenMemoryViewProps> = ({
               {hoveredGroup.field.byteSize} B
             </span>
             <span>{fieldHex(buffer, hoveredGroup.field)}</span>
-            <span className={roundTripStyle}>
-              input {formatValue(input[hoveredGroup.field.element.name])} →
-              stored{" "}
-              <b>{formatValue(stored[hoveredGroup.field.element.name])}</b> →
-              reads back{" "}
-              <b>{formatValue(decoded[hoveredGroup.field.element.name])}</b>
-            </span>
+            {hoveredGroup.field.kind === "u64" ? (
+              // String fields store a pool reference, not the text: the
+              // round-trip resolves through the simulation's string pool.
+              <span className={roundTripStyle}>
+                input {formatValue(input[hoveredGroup.field.element.name])} →
+                pool id {stringPoolId(buffer, hoveredGroup.field)} →{" "}
+                <b>{formatValue(decoded[hoveredGroup.field.element.name])}</b>
+              </span>
+            ) : (
+              <span className={roundTripStyle}>
+                input {formatValue(input[hoveredGroup.field.element.name])} →
+                stored{" "}
+                <b>{formatValue(stored[hoveredGroup.field.element.name])}</b> →
+                reads back{" "}
+                <b>{formatValue(decoded[hoveredGroup.field.element.name])}</b>
+              </span>
+            )}
           </>
         )}
       </div>

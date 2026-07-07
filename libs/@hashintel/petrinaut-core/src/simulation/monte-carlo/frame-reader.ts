@@ -39,9 +39,11 @@ export function createMonteCarloFrameReader(
         tokens.push(
           readTokenRecord(
             tokenLayout,
-            currentFrame.tokenF64,
-            currentFrame.tokenBytes,
+            currentFrame.tokenViews,
             byteOffset + tokenIndex * tokenLayout.strideBytes,
+            // The run's pool never crosses threads — metric frames carry
+            // plain decoded values.
+            simulation.stringPool,
           ),
         );
       }

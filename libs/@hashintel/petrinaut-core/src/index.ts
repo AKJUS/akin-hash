@@ -174,6 +174,7 @@ export type {
   WorkerFactory,
   InitialMarking,
   InitialPlaceMarking,
+  InitialTokenAttributeValue,
   MonteCarloAdvanceResult,
   MonteCarloActiveRunPlaceCountsVisitor,
   MonteCarloExperiment,
@@ -333,18 +334,37 @@ export { buildMetricState } from "./simulation/frames/metric-state";
 export {
   coerceTokenAttributeValue,
   coerceTokenRecord,
+  coerceToStoredTokenAttributeValue,
   defaultTokenAttributeValue,
   encodeTokenAttributeValue,
 } from "./simulation/engine/token-values";
+export {
+  COLOR_ELEMENT_TYPES,
+  TYPE_POLICIES,
+  type StoredTokenAttributeValue,
+  type TypePolicy,
+} from "./simulation/engine/type-policies";
 export {
   computeTokenSlotLayout,
   createTokenRegionViews,
   encodeTokenToBytes,
   readTokenRecord,
   type PhysicalKind,
+  type StringPoolReader,
+  type StringPoolWriter,
   type TokenLayoutField,
+  type TokenRegionViews,
   type TokenSlotLayout,
 } from "./simulation/engine/token-layout";
+export { StringPool } from "./simulation/engine/string-pool";
+export {
+  formatUuid,
+  isUuidString,
+  NIL_UUID,
+  parseUuid,
+  PETRINAUT_UUID_NAMESPACE,
+  toUuid,
+} from "./simulation/engine/uuid";
 export { compileUserCode } from "./simulation/authoring/user-code/compile-user-code";
 export {
   displayNameSchema,

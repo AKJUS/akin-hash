@@ -14,6 +14,8 @@ const typeOptions: SelectItem<ColorElementType>[] = [
   { value: "real", text: "Real" },
   { value: "integer", text: "Integer" },
   { value: "boolean", text: "Boolean" },
+  { value: "uuid", text: "UUID" },
+  { value: "string", text: "String" },
 ];
 
 const listStyle = css({
