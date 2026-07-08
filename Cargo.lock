@@ -3527,6 +3527,7 @@ dependencies = [
  "jsonwebtoken",
  "mimalloc",
  "multiaddr",
+ "rayon",
  "regex",
  "reqwest",
  "simple-mermaid",
@@ -3677,9 +3678,14 @@ dependencies = [
 name = "hash-graph-embeddings"
 version = "0.0.0"
 dependencies = [
+ "codspeed-criterion-compat",
+ "darwin-kperf-criterion",
  "derive_more",
  "error-stack",
  "hash-graph-types",
+ "rand 0.10.1",
+ "rand_xoshiro",
+ "rayon",
  "reqwest",
  "reqwest-middleware",
  "reqwest-retry",
@@ -3700,6 +3706,7 @@ dependencies = [
  "hash-graph-store",
  "hash-graph-temporal-versioning",
  "hash-graph-test-data",
+ "hash-graph-types",
  "hash-status",
  "hash-telemetry",
  "pretty_assertions",
@@ -3770,6 +3777,7 @@ dependencies = [
  "futures-sink",
  "hash-codec",
  "hash-graph-authorization",
+ "hash-graph-embeddings",
  "hash-graph-migrations",
  "hash-graph-store",
  "hash-graph-temporal-versioning",
@@ -3782,6 +3790,7 @@ dependencies = [
  "indoc",
  "postgres-types",
  "pretty_assertions",
+ "rayon",
  "refinery",
  "regex",
  "semver",
@@ -8030,6 +8039,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
 dependencies = [
  "rand_core 0.9.5",
+]
+
+[[package]]
+name = "rand_xoshiro"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "662effc7698e08ea324d3acccf8d9d7f7bf79b9785e270a174ea36e56900c91d"
+dependencies = [
+ "rand_core 0.10.1",
 ]
 
 [[package]]
