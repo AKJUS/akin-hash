@@ -39,6 +39,9 @@ const scenarioRowStyle = css({
   alignItems: "center",
   gap: "2",
   flexShrink: 0,
+  // Small right inset so the action buttons don't hug the column edge,
+  // matching the parameters list below.
+  paddingRight: "2",
 });
 
 const scenarioLabelStyle = css({
@@ -181,16 +184,21 @@ const parametersListStyle = css({
   // End padding: scrolls with the content, giving the last row breathing
   // room without reserving fixed space below the list.
   paddingBottom: "3",
+  // Small right inset so row values don't hug the scrollbar/column edge.
+  paddingRight: "2",
 });
 
 // Plain rows separated by hairline dividers, matching the sidebar's
-// parameter list, rather than card-like boxes.
+// parameter list, rather than card-like boxes. A small horizontal inset
+// nudges the name and value off the row edges; the divider still spans the
+// full width.
 const parameterRowStyle = css({
   display: "flex",
   alignItems: "center",
   justifyContent: "space-between",
   gap: "4",
   paddingY: "2",
+  paddingX: "1",
   borderBottomWidth: "thin",
   borderBottomColor: "neutral.a25",
   "&:last-child": {
