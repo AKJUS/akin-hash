@@ -32,6 +32,7 @@ const INVALID_OPTIMIZATION_REQUEST = {
 } as const;
 
 type OptimizationTimeoutKind = "response_start" | "idle" | "overall";
+type OptimizationTerminalOutcome = "completed" | "upstream-error";
 
 type OptimizationRequestLifecycle = {
   /** Signal that cancels the upstream optimizer request. */
@@ -39,15 +40,15 @@ type OptimizationRequestLifecycle = {
   /** Mutable outcome needed when translating a stream failure. */
   state: {
     clientDisconnected: boolean;
-    terminalEventSent: boolean;
+    terminalOutcome: OptimizationTerminalOutcome | null;
     timeoutKind: OptimizationTimeoutKind | null;
   };
   /** Stop timers, heartbeats, and request/response listeners. */
   cleanup: () => void;
   /** Clear the response-start deadline and begin idle/heartbeat tracking. */
   markResponseStarted: () => void;
-  /** Remember that the public stream already contains its terminal event. */
-  markTerminalEvent: () => void;
+  /** Remember the domain outcome committed to the public stream. */
+  markTerminalOutcome: (outcome: OptimizationTerminalOutcome) => void;
   /** Restart the deadline for receiving upstream bytes. */
   resetIdleTimeout: () => void;
 };
@@ -60,7 +61,7 @@ const createOptimizationRequestLifecycle = (
   const abortController = new AbortController();
   const state: OptimizationRequestLifecycle["state"] = {
     clientDisconnected: false,
-    terminalEventSent: false,
+    terminalOutcome: null,
     timeoutKind: null,
   };
   let downstreamHeartbeat: ReturnType<typeof setInterval> | undefined;
@@ -122,8 +123,8 @@ const createOptimizationRequestLifecycle = (
       }, DOWNSTREAM_HEARTBEAT_INTERVAL_MS);
       downstreamHeartbeat.unref();
     },
-    markTerminalEvent: () => {
-      state.terminalEventSent = true;
+    markTerminalOutcome: (outcome) => {
+      state.terminalOutcome = outcome;
     },
     resetIdleTimeout,
   };
@@ -198,19 +199,29 @@ const writeTerminalOptimizationEventBestEffort = (
 const forwardOptimizationEvents = async (
   events: AsyncIterable<PetrinautOptimizationEvent>,
   response: ExpressResponse,
-  markTerminalEvent: () => void,
+  markTerminalOutcome: (outcome: OptimizationTerminalOutcome) => void,
   signal: AbortSignal,
-): Promise<void> => {
+): Promise<OptimizationTerminalOutcome> => {
   for await (const event of events) {
+    const terminalOutcome =
+      event.type === "complete"
+        ? "completed"
+        : event.type === "error"
+          ? "upstream-error"
+          : null;
     const backpressureWait = writeOptimizationEvent(response, event, signal);
-    if (event.type === "complete" || event.type === "error") {
+    if (terminalOutcome !== null) {
       // The write is committed synchronously even when the buffer is full,
-      // so the stream contains its terminal event regardless of how the
-      // backpressure wait settles — an abort must not append a second one.
-      markTerminalEvent();
+      // so preserve its domain outcome even if a later backpressure wait is
+      // interrupted by a timeout or downstream disconnect.
+      markTerminalOutcome(terminalOutcome);
     }
     await backpressureWait;
+    if (terminalOutcome !== null) {
+      return terminalOutcome;
+    }
   }
+  throw new Error("The optimizer stream ended without a terminal event");
 };
 
 /** Create the authenticated endpoint that proxies optimization studies. */
@@ -220,13 +231,17 @@ export const createPetrinautOptimizationHandler = ({
   origin,
 }: {
   fetchImpl: PetrinautOptimizerFetch;
-  logger: Pick<Logger, "warn">;
+  logger: Pick<Logger, "info" | "warn">;
   origin: URL | null;
 }): RequestHandler => {
   let activeOptimizationCount = 0;
   const activeUserIds = new Set<string>();
 
   return async (request, response) => {
+    const startedAt = Date.now();
+    const requestId = response.get("x-hash-request-id") ?? "";
+    const logContext = requestId ? { requestId } : {};
+
     if (!request.user) {
       response.status(401).json({ error: "Authentication required" });
       return;
@@ -240,12 +255,21 @@ export const createPetrinautOptimizationHandler = ({
 
     const userId = request.user.accountId;
     if (activeUserIds.has(userId)) {
+      logger.warn("Petrinaut optimization rejected: account busy", {
+        ...logContext,
+        activeOptimizationCount,
+      });
       response.status(429).json({
         error: "An optimization is already running for this account",
       });
       return;
     }
     if (activeOptimizationCount >= MAX_CONCURRENT_OPTIMIZATIONS) {
+      logger.warn("Petrinaut optimization rejected: at capacity", {
+        ...logContext,
+        activeOptimizationCount,
+        maxConcurrentOptimizations: MAX_CONCURRENT_OPTIMIZATIONS,
+      });
       response.status(429).json({ error: "Petrinaut optimizer is busy" });
       return;
     }
@@ -278,15 +302,35 @@ export const createPetrinautOptimizationHandler = ({
     activeOptimizationCount += 1;
     activeUserIds.add(userId);
     const lifecycle = createOptimizationRequestLifecycle(request, response);
+    let optimizationRunId: string | null = null;
+    const logTerminalOutcome = (outcome: OptimizationTerminalOutcome) => {
+      const terminalMetadata = {
+        ...logContext,
+        durationMs: Date.now() - startedAt,
+        optimizationRunId,
+        outcome,
+      };
+      if (outcome === "completed") {
+        logger.info("Petrinaut optimization finished", terminalMetadata);
+      } else {
+        logger.warn("Petrinaut optimization failed", terminalMetadata);
+      }
+    };
 
     try {
-      const upstreamEvents = await openPetrinautOptimizationStream({
+      const upstream = await openPetrinautOptimizationStream({
         endpoint: new URL("/optimize/all", origin),
         fetchImpl,
         input: input.data,
         maxEventBytes: MAX_EVENT_BYTES,
         onActivity: lifecycle.resetIdleTimeout,
+        ...(requestId ? { requestId } : {}),
         signal: lifecycle.signal,
+      });
+      optimizationRunId = upstream.optimizationRunId;
+      logger.info("Petrinaut optimization stream opened", {
+        ...logContext,
+        optimizationRunId,
       });
 
       response.status(200);
@@ -294,25 +338,64 @@ export const createPetrinautOptimizationHandler = ({
         "Cache-Control": "no-cache, no-store",
         "Content-Type": "application/x-ndjson; charset=utf-8",
         "X-Accel-Buffering": "no",
+        // Expose the optimizer's run id so a browser can correlate this
+        // response with NodeAPI and optimizer logs when the stream fails.
+        ...(optimizationRunId === null
+          ? {}
+          : { "X-Optimization-Run-ID": optimizationRunId }),
       });
       response.flushHeaders();
       lifecycle.markResponseStarted();
-      await forwardOptimizationEvents(
-        upstreamEvents,
+      const outcome = await forwardOptimizationEvents(
+        upstream.events,
         response,
-        lifecycle.markTerminalEvent,
+        lifecycle.markTerminalOutcome,
         lifecycle.signal,
       );
       response.end();
+      logTerminalOutcome(outcome);
     } catch (error) {
+      const durationMs = Date.now() - startedAt;
+      // A study that fails before its stream opens still has a run id on the
+      // optimizer's error response; keep it so the failure log correlates.
+      if (
+        optimizationRunId === null &&
+        error instanceof PetrinautOptimizerHttpError
+      ) {
+        optimizationRunId = error.optimizationRunId;
+      }
+      if (lifecycle.state.terminalOutcome !== null) {
+        logTerminalOutcome(lifecycle.state.terminalOutcome);
+        if (!response.destroyed && !response.writableEnded) {
+          response.end();
+        }
+        return;
+      }
       if (lifecycle.state.clientDisconnected || response.destroyed) {
+        logger.info("Petrinaut optimization finished", {
+          ...logContext,
+          durationMs,
+          optimizationRunId,
+          outcome: "client-disconnected",
+        });
         return;
       }
       logger.warn("Petrinaut optimization failed", {
-        error,
+        ...logContext,
+        durationMs,
+        errorType: error instanceof Error ? error.name : typeof error,
+        optimizationRunId,
+        outcome: lifecycle.state.timeoutKind
+          ? `timeout:${lifecycle.state.timeoutKind}`
+          : "upstream-error",
         timeoutKind: lifecycle.state.timeoutKind,
+        upstreamStatus:
+          error instanceof PetrinautOptimizerHttpError ? error.status : null,
       });
       if (!response.headersSent) {
+        if (optimizationRunId !== null) {
+          response.set({ "X-Optimization-Run-ID": optimizationRunId });
+        }
         if (
           error instanceof PetrinautOptimizerHttpError &&
           error.status === 429
@@ -330,23 +413,23 @@ export const createPetrinautOptimizationHandler = ({
         }
         return;
       }
-      if (!lifecycle.state.terminalEventSent) {
-        try {
-          writeTerminalOptimizationEventBestEffort(response, {
-            type: "error",
-            code: lifecycle.state.timeoutKind
-              ? "optimization_timeout"
-              : "upstream_stream_error",
-            message: lifecycle.state.timeoutKind
-              ? "The optimization exceeded its execution time limit"
-              : "The optimizer stream ended unexpectedly",
-            retryable: true,
-          } satisfies PetrinautOptimizationEvent);
-        } catch (writeError) {
-          logger.warn("Could not report Petrinaut optimization failure", {
-            error: writeError,
-          });
-        }
+      try {
+        writeTerminalOptimizationEventBestEffort(response, {
+          type: "error",
+          code: lifecycle.state.timeoutKind
+            ? "optimization_timeout"
+            : "upstream_stream_error",
+          message: lifecycle.state.timeoutKind
+            ? "The optimization exceeded its execution time limit"
+            : "The optimizer stream ended unexpectedly",
+          retryable: true,
+        } satisfies PetrinautOptimizationEvent);
+      } catch (writeError) {
+        logger.warn("Could not report Petrinaut optimization failure", {
+          ...logContext,
+          error: writeError,
+          optimizationRunId,
+        });
       }
       if (!response.writableEnded) {
         response.end();

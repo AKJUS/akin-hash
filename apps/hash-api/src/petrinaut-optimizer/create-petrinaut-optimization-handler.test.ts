@@ -54,7 +54,31 @@ const validOptimizationInput = {
   study: { trials: 2, sampler: "tpe" },
 };
 
-const logger = { warn: () => undefined } as unknown as Pick<Logger, "warn">;
+type RecordedLog = {
+  level: "info" | "warn";
+  message: string;
+  metadata: Record<string, unknown>;
+};
+
+/** Build a logger fake that records structured logs. */
+const createRecordingLogger = () => {
+  const entries: RecordedLog[] = [];
+  const record =
+    (level: "info" | "warn") =>
+    (message: string, metadata?: Record<string, unknown>) => {
+      entries.push({
+        level,
+        message,
+        metadata: metadata ?? {},
+      });
+    };
+  const logger = {
+    info: record("info"),
+    warn: record("warn"),
+  } as unknown as Pick<Logger, "info" | "warn">;
+  return { entries, logger };
+};
+
 const unexpectedFetch = async (): Promise<Response> => {
   throw new Error("Unexpected upstream request");
 };
@@ -67,6 +91,7 @@ const callHandler = async ({
   body,
   fetchImpl = unexpectedFetch,
   handler,
+  logger,
   onRequest,
   onResponse,
   writeReturns,
@@ -76,6 +101,7 @@ const callHandler = async ({
   fetchImpl?: (input: string | URL, init?: RequestInit) => Promise<Response>;
   /** Reuse one handler across calls to observe its slot bookkeeping. */
   handler?: ReturnType<typeof createPetrinautOptimizationHandler>;
+  logger?: Pick<Logger, "info" | "warn">;
   onRequest?: (request: EventEmitter) => void;
   onResponse?: (response: FakeResponse) => void;
   /** Decide each write's backpressure result; defaults to no backpressure. */
@@ -112,6 +138,8 @@ const callHandler = async ({
     flushHeaders: () => {
       headersSent = true;
     },
+    get: (name: string) =>
+      name.toLowerCase() === "x-hash-request-id" ? "request-id-1" : undefined,
     json: (value: unknown) => {
       bodyResult = value;
       headersSent = true;
@@ -146,7 +174,7 @@ const callHandler = async ({
     handler ??
     createPetrinautOptimizationHandler({
       fetchImpl,
-      logger,
+      logger: logger ?? createRecordingLogger().logger,
       origin: new URL("http://petrinaut-opt:4004"),
     });
 
@@ -169,6 +197,7 @@ describe("createPetrinautOptimizationHandler", () => {
   });
 
   it("validates the public optimization request", async () => {
+    const { entries, logger } = createRecordingLogger();
     const result = await callHandler({
       body: {
         ...validOptimizationInput,
@@ -187,6 +216,7 @@ describe("createPetrinautOptimizationHandler", () => {
           },
         },
       },
+      logger,
     });
 
     expect(result.statusCode).toBe(400);
@@ -203,6 +233,13 @@ describe("createPetrinautOptimizationHandler", () => {
       },
       error: "Invalid optimization request",
     });
+
+    // HTTP tracing captures the 400; avoid duplicating validation data in
+    // application logs because the manifest can embed user-authored code.
+    expect(entries).toEqual([]);
+    const loggedText = JSON.stringify(entries);
+    expect(loggedText).not.toContain("return 1;");
+    expect(loggedText).not.toContain("petrinaut-optimization");
   });
 
   it("preserves an upstream optimizer busy response", async () => {
@@ -260,31 +297,41 @@ describe("createPetrinautOptimizationHandler", () => {
   });
 
   it("proxies optimizer SSE as canonical NDJSON", async () => {
-    let upstreamRequest: { body: string | undefined; url: string } | undefined;
+    let upstreamRequest:
+      | { body: string | undefined; requestId: unknown; url: string }
+      | undefined;
     const upstream = [
       'data: {"step":0,"params":{"rate":0.4},"init_state":{},"metric":2,"state":"COMPLETE"}\n\n',
       ": heartbeat\n\n",
       'data: {"step":1,"params":{"rate":0.8},"init_state":{},"metric":4,"state":"COMPLETE"}\n\n',
       "event: done\ndata: {}\n\n",
     ].join("");
+    const { entries, logger } = createRecordingLogger();
 
     const result = await callHandler({
       body: validOptimizationInput,
       fetchImpl: async (input, init) => {
         upstreamRequest = {
           body: typeof init?.body === "string" ? init.body : undefined,
+          requestId: new Headers(init?.headers).get("x-hash-request-id"),
           url: input.toString(),
         };
         return new Response(upstream, {
-          headers: { "content-type": "text/event-stream" },
+          headers: {
+            "content-type": "text/event-stream",
+            "x-optimization-run-id": "run-1",
+          },
         });
       },
+      logger,
     });
 
     expect(result.statusCode).toBe(200);
     expect(result.headers).toMatchObject({
       "Content-Type": "application/x-ndjson; charset=utf-8",
       "X-Accel-Buffering": "no",
+      // The optimizer's run id reaches the browser for correlation.
+      "X-Optimization-Run-ID": "run-1",
     });
     expect(result.output).toEqual([
       '{"type":"started","requestedTrials":2}\n',
@@ -293,9 +340,64 @@ describe("createPetrinautOptimizationHandler", () => {
       '{"type":"complete","requestedTrials":2,"completedTrials":2,"prunedTrials":0,"failedTrials":0,"best":{"trial":1,"parameters":{"rate":0.8},"objective":4}}\n',
     ]);
     expect(upstreamRequest?.url).toBe("http://petrinaut-opt:4004/optimize/all");
+    expect(upstreamRequest?.requestId).toBe("request-id-1");
     expect(JSON.parse(upstreamRequest?.body ?? "null")).toEqual(
       validOptimizationInput,
     );
+
+    // The full request lifecycle is logged with its correlation identifiers.
+    expect(entries).toEqual([
+      {
+        level: "info",
+        message: "Petrinaut optimization stream opened",
+        metadata: {
+          optimizationRunId: "run-1",
+          requestId: "request-id-1",
+        },
+      },
+      {
+        level: "info",
+        message: "Petrinaut optimization finished",
+        metadata: {
+          durationMs: expect.any(Number),
+          optimizationRunId: "run-1",
+          outcome: "completed",
+          requestId: "request-id-1",
+        },
+      },
+    ]);
+    // The manifest itself — including user-authored code — is never logged.
+    const loggedText = JSON.stringify(entries);
+    expect(loggedText).not.toContain("return 1;");
+    expect(loggedText).not.toContain("petrinaut-optimization");
+  });
+
+  it("logs an upstream terminal error as failed", async () => {
+    const { entries, logger } = createRecordingLogger();
+    const result = await callHandler({
+      body: validOptimizationInput,
+      fetchImpl: async () =>
+        new Response('event: error\ndata: {"message":"failed"}\n\n', {
+          headers: {
+            "content-type": "text/event-stream",
+            "x-optimization-run-id": "run-failed-1",
+          },
+        }),
+      logger,
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.output.at(-1)).toContain('"type":"error"');
+    expect(entries.at(-1)).toEqual({
+      level: "warn",
+      message: "Petrinaut optimization failed",
+      metadata: {
+        durationMs: expect.any(Number),
+        optimizationRunId: "run-failed-1",
+        outcome: "upstream-error",
+        requestId: "request-id-1",
+      },
+    });
   });
 
   it("preserves an upstream busy response without a Retry-After header", async () => {
@@ -308,6 +410,36 @@ describe("createPetrinautOptimizationHandler", () => {
     expect(result.statusCode).toBe(429);
     expect(result.body).toEqual({ error: "Petrinaut optimizer is busy" });
     expect(result.headers).not.toHaveProperty("Retry-After");
+  });
+
+  it("correlates a pre-stream upstream failure with the optimizer run id", async () => {
+    const { entries, logger } = createRecordingLogger();
+    const result = await callHandler({
+      body: validOptimizationInput,
+      fetchImpl: async () =>
+        Response.json(
+          { detail: "failed to initialise optimization" },
+          { status: 500, headers: { "x-optimization-run-id": "run-init-9" } },
+        ),
+      logger,
+    });
+
+    expect(result.statusCode).toBe(502);
+    expect(result.headers).toMatchObject({
+      "X-Optimization-Run-ID": "run-init-9",
+    });
+    const failure = entries.find(
+      (entry) => entry.message === "Petrinaut optimization failed",
+    );
+    expect(failure?.metadata).toMatchObject({
+      errorType: "PetrinautOptimizerHttpError",
+      optimizationRunId: "run-init-9",
+      outcome: "upstream-error",
+      upstreamStatus: 500,
+    });
+    expect(JSON.stringify(failure)).not.toContain(
+      "failed to initialise optimization",
+    );
   });
 
   it("cleans up backpressure listeners and survives a late close", async () => {
@@ -380,7 +512,7 @@ describe("createPetrinautOptimizationHandler", () => {
           }),
           { headers: { "content-type": "text/event-stream" } },
         ),
-      logger,
+      logger: createRecordingLogger().logger,
       origin: new URL("http://petrinaut-opt:4004"),
     });
     let activeResponse: FakeResponse | undefined;
@@ -455,7 +587,7 @@ describe("createPetrinautOptimizationHandler", () => {
             }),
             { headers: { "content-type": "text/event-stream" } },
           ),
-        logger,
+        logger: createRecordingLogger().logger,
         origin: new URL("http://petrinaut-opt:4004"),
       });
 
@@ -532,8 +664,84 @@ describe("createPetrinautOptimizationHandler", () => {
     }
   });
 
+  it.each([
+    {
+      expectedLevel: "info" as const,
+      expectedMessage: "Petrinaut optimization finished",
+      expectedOutcome: "completed",
+      terminalType: "complete",
+      upstream: [
+        'data: {"step":0,"params":{"rate":0.4},"init_state":{},"metric":2,"state":"COMPLETE"}\n\n',
+        "event: done\ndata: {}\n\n",
+      ].join(""),
+    },
+    {
+      expectedLevel: "warn" as const,
+      expectedMessage: "Petrinaut optimization failed",
+      expectedOutcome: "upstream-error",
+      terminalType: "error",
+      upstream: 'event: error\ndata: {"message":"failed"}\n\n',
+    },
+  ])(
+    "preserves $expectedOutcome when the client disconnects during terminal backpressure",
+    async ({
+      expectedLevel,
+      expectedMessage,
+      expectedOutcome,
+      terminalType,
+      upstream,
+    }) => {
+      const { entries, logger } = createRecordingLogger();
+      let activeResponse: FakeResponse | undefined;
+
+      const result = await callHandler({
+        body: validOptimizationInput,
+        fetchImpl: async () =>
+          new Response(upstream, {
+            headers: {
+              "content-type": "text/event-stream",
+              "x-optimization-run-id": "run-terminal-1",
+            },
+          }),
+        logger,
+        onResponse: (response) => {
+          activeResponse = response;
+        },
+        writeReturns: (value) => {
+          if (value.includes(`"type":"${terminalType}"`)) {
+            setImmediate(() => {
+              activeResponse!.destroyed = true;
+              activeResponse!.emit("close");
+            });
+            return false;
+          }
+          return true;
+        },
+      });
+
+      const terminalEvents = result.output.filter(
+        (frame) =>
+          frame.includes('"type":"complete"') ||
+          frame.includes('"type":"error"'),
+      );
+      expect(terminalEvents).toHaveLength(1);
+      expect(terminalEvents[0]).toContain(`"type":"${terminalType}"`);
+      expect(entries.at(-1)).toEqual({
+        level: expectedLevel,
+        message: expectedMessage,
+        metadata: {
+          durationMs: expect.any(Number),
+          optimizationRunId: "run-terminal-1",
+          outcome: expectedOutcome,
+          requestId: "request-id-1",
+        },
+      });
+    },
+  );
+
   it("aborts disconnected requests and releases the user slot", async () => {
     let abortObserved = false;
+    const { entries, logger } = createRecordingLogger();
     await callHandler({
       body: validOptimizationInput,
       fetchImpl: async (_input, init) =>
@@ -547,10 +755,22 @@ describe("createPetrinautOptimizationHandler", () => {
             { once: true },
           );
         }),
+      logger,
       onRequest: (request) => request.emit("aborted"),
     });
 
     expect(abortObserved).toBe(true);
+    // A silent client disconnect still leaves a terminal outcome log.
+    expect(entries.at(-1)).toEqual({
+      level: "info",
+      message: "Petrinaut optimization finished",
+      metadata: {
+        durationMs: expect.any(Number),
+        optimizationRunId: null,
+        outcome: "client-disconnected",
+        requestId: "request-id-1",
+      },
+    });
 
     const second = await callHandler({
       body: validOptimizationInput,
@@ -561,5 +781,47 @@ describe("createPetrinautOptimizationHandler", () => {
     });
     expect(second.statusCode).toBe(200);
     expect(second.output).toHaveLength(2);
+  });
+
+  it("logs capacity rejections for a user with a running optimization", async () => {
+    const { entries, logger } = createRecordingLogger();
+    let releaseFirst: (() => void) | undefined;
+    const handler = createPetrinautOptimizationHandler({
+      fetchImpl: async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          releaseFirst = () =>
+            reject(new DOMException("Aborted", "AbortError"));
+          init?.signal?.addEventListener("abort", () => releaseFirst?.(), {
+            once: true,
+          });
+        }),
+      logger,
+      origin: new URL("http://petrinaut-opt:4004"),
+    });
+    let firstRequest: EventEmitter | undefined;
+
+    const firstPromise = callHandler({
+      body: validOptimizationInput,
+      handler,
+      onRequest: (request) => {
+        firstRequest = request;
+      },
+    });
+    // Let the first request reach the pending upstream fetch.
+    await new Promise(setImmediate);
+
+    const second = await callHandler({ body: validOptimizationInput, handler });
+    expect(second.statusCode).toBe(429);
+    expect(entries).toContainEqual({
+      level: "warn",
+      message: "Petrinaut optimization rejected: account busy",
+      metadata: {
+        activeOptimizationCount: 1,
+        requestId: "request-id-1",
+      },
+    });
+
+    firstRequest?.emit("aborted");
+    await firstPromise;
   });
 });

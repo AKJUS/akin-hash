@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from typing import Any
 
@@ -35,7 +36,7 @@ def test_posts_an_opaque_manifest_to_the_all_sse_route(
 ) -> None:
     received: list[dict[str, Any]] = []
 
-    def initialize(manifest: dict[str, Any]) -> FakeOptimizer:
+    def initialize(manifest: dict[str, Any], **_kwargs: Any) -> FakeOptimizer:
         received.append(manifest)
         return FakeOptimizer()
 
@@ -60,7 +61,7 @@ def test_posts_an_opaque_manifest_to_the_best_sse_route(
 ) -> None:
     received: list[dict[str, Any]] = []
 
-    def initialize(manifest: dict[str, Any]) -> FakeOptimizer:
+    def initialize(manifest: dict[str, Any], **_kwargs: Any) -> FakeOptimizer:
         received.append(manifest)
         return FakeOptimizer()
 
@@ -139,7 +140,7 @@ def test_reports_initialization_failure_with_the_run_id(
     optimization_manifest: dict,
     monkeypatch,
 ) -> None:
-    def initialize(_manifest: dict[str, Any]) -> FakeOptimizer:
+    def initialize(_manifest: dict[str, Any], **_kwargs: Any) -> FakeOptimizer:
         raise RuntimeError("manifest rejected by CLI")
 
     monkeypatch.setattr(optimization_api, "initialize_optimizer", initialize)
@@ -164,13 +165,41 @@ def test_reports_initialization_failure_with_the_run_id(
     assert run_status.json() == statuses.json()[0]
 
 
+def test_initialization_failure_log_omits_the_raw_error_message(
+    optimization_manifest: dict,
+    monkeypatch,
+    caplog,
+) -> None:
+    """The CLI error string can embed user content, so it must not be logged."""
+    secret = "Petrinaut failed to load the optimization manifest: user_secret_xyz"
+
+    def initialize(_manifest: dict[str, Any], **_kwargs: Any) -> FakeOptimizer:
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(optimization_api, "initialize_optimizer", initialize)
+
+    with caplog.at_level("ERROR", logger="pn_api"):
+        with TestClient(optimization_api.app) as client:
+            response = client.post("/optimize/all", json=optimization_manifest)
+
+    failures = [r for r in caplog.records if r.event == "initialization_failed"]
+    assert failures
+    record = failures[0]
+    assert record.error_type == "RuntimeError"
+    assert not hasattr(record, "error_category")
+    assert not hasattr(record, "error")
+    assert "user_secret_xyz" not in record.getMessage()
+    # The full message still reaches the requester in the response detail.
+    assert "user_secret_xyz" in response.json()["detail"]
+
+
 def test_initializer_runs_off_the_event_loop(
     optimization_manifest: dict,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     initializer_thread_ids: list[int] = []
 
-    def initialize(_manifest: dict[str, Any]) -> FakeOptimizer:
+    def initialize(_manifest: dict[str, Any], **_kwargs: Any) -> FakeOptimizer:
         initializer_thread_ids.append(threading.get_ident())
         return FakeOptimizer()
 
@@ -196,6 +225,32 @@ def test_rejects_studies_above_the_process_local_limit(
 
     assert response.status_code == 429
     assert response.headers["retry-after"] == str(optimization_api.RETRY_AFTER_SECONDS)
+
+
+def test_capacity_rejection_is_logged_with_the_request_id(
+    optimization_manifest: dict,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="pn_api"):
+        with TestClient(optimization_api.app) as client:
+            optimization_api.app.state.active_optimizations = (
+                optimization_api.MAX_ACTIVE_OPTIMIZATIONS
+            )
+            response = client.post(
+                "/optimize/all",
+                json=optimization_manifest,
+                headers={"x-hash-request-id": "request-cap-1"},
+            )
+
+    assert response.status_code == 429
+    rejection = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "capacity_rejected"
+    )
+    assert rejection.request_id == "request-cap-1"
+    assert rejection.active_optimizations == optimization_api.MAX_ACTIVE_OPTIMIZATIONS
+    assert "manifest" not in rejection.getMessage()
 
 
 class RecordingModel:
@@ -271,7 +326,7 @@ def test_background_cleanup_covers_a_stream_that_never_starts(
     """An aborted response may never pull the body, skipping generator finallys."""
     optimizer = _optimizer_with_recording_model()
     monkeypatch.setattr(
-        optimization_api, "initialize_optimizer", lambda _manifest: optimizer
+        optimization_api, "initialize_optimizer", lambda _manifest, **_kwargs: optimizer
     )
 
     async def abandon_response() -> None:
@@ -324,7 +379,7 @@ def test_cancellation_during_initialization_closes_cli_and_releases_slot(
     optimizer = FakeOptimizer()
     optimizer.pn_model = ClosableModel()  # type: ignore[attr-defined]
 
-    def initialize(_manifest: dict[str, Any]) -> FakeOptimizer:
+    def initialize(_manifest: dict[str, Any], **_kwargs: Any) -> FakeOptimizer:
         started.set()
         finish.wait(timeout=1)
         return optimizer
@@ -359,7 +414,7 @@ def test_second_cancellation_still_closes_an_abandoned_cli(
     started = threading.Event()
     finish = threading.Event()
 
-    def initialize(_manifest: dict[str, Any]) -> FakeOptimizer:
+    def initialize(_manifest: dict[str, Any], **_kwargs: Any) -> FakeOptimizer:
         started.set()
         finish.wait(timeout=2)
         return optimizer

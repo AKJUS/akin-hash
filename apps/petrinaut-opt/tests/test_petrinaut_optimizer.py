@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 import time
 from typing import Any
@@ -73,6 +74,7 @@ class ConnectedRequest:
     def __init__(self) -> None:
         self.app = FastAPI()
         self.app.state.statuses = StatusStore()
+        self.headers: dict[str, str] = {}
 
     async def is_disconnected(self) -> bool:
         return False
@@ -129,13 +131,26 @@ def test_objective_sends_only_flat_suggested_values(
 
 def test_objective_prunes_only_evaluation_errors(
     optimization_description: dict,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    model = FailingModel(optimization_description, PetrinautRunError("scenario failed"))
+    sensitive_detail = "secret user-authored expression"
+    model = FailingModel(
+        optimization_description, PetrinautRunError(sensitive_detail)
+    )
     optimizer = PetrinautOptimizer(model)  # type: ignore[arg-type]
     trial = optuna.trial.FixedTrial({"rate": 1.25, "count": 8, "enabled": True})
 
-    with pytest.raises(optuna.TrialPruned):
+    with (
+        caplog.at_level(logging.WARNING, logger="pn_optimize"),
+        pytest.raises(optuna.TrialPruned),
+    ):
         optimizer.objective(trial)
+
+    record = next(
+        record for record in caplog.records if "pruned" in record.getMessage()
+    )
+    assert sensitive_detail not in record.getMessage()
+    assert record.error_type == "PetrinautRunError"
 
 
 def test_objective_propagates_transport_errors(
@@ -206,6 +221,72 @@ def test_rejects_invalid_cli_descriptions(
         PetrinautOptimizer(  # type: ignore[arg-type]
             FakeModel(optimization_description)
         )
+
+
+def test_stream_all_logs_the_study_lifecycle_with_correlation(
+    optimization_description: dict,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    model = FakeModel(optimization_description)
+    optimizer = PetrinautOptimizer(model)  # type: ignore[arg-type]
+    request = ConnectedRequest()
+    request.headers = {"x-hash-request-id": "request-s1"}  # type: ignore[attr-defined]
+    run_id = _run_id(request)
+
+    async def consume() -> None:
+        async for _frame in optimizer.stream_all(
+            request,
+            run_id,
+            optimizer.n_trials,  # type: ignore[arg-type]
+        ):
+            pass
+
+    with caplog.at_level(logging.INFO, logger="pn_optimize"):
+        asyncio.run(consume())
+
+    events = {
+        getattr(record, "event", None): record
+        for record in caplog.records
+        if record.name == "pn_optimize"
+    }
+    for expected in ("study_started", "study_completed"):
+        record = events[expected]
+        assert record.run_id == run_id
+        assert record.request_id == "request-s1"
+        assert record.trials == optimizer.n_trials
+
+
+def test_disconnect_is_logged_with_the_run_id(
+    optimization_description: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    optimization_description["study"]["trials"] = 1
+    monkeypatch.setattr(petrinaut_optimizer, "_WORKER_SHUTDOWN_TIMEOUT_SECONDS", 0.01)
+    model = StubbornModel(optimization_description)
+    optimizer = PetrinautOptimizer(model)  # type: ignore[arg-type]
+    request = DisconnectedAfterWorkerStarts(model)
+    run_id = _run_id(request)
+
+    async def consume() -> None:
+        async for _frame in optimizer.stream_all(
+            request,
+            run_id,
+            optimizer.n_trials,  # type: ignore[arg-type]
+        ):
+            pass
+        model.release.set()
+        await asyncio.sleep(0.05)
+
+    with caplog.at_level(logging.INFO, logger="pn_optimize"):
+        asyncio.run(consume())
+
+    disconnected = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "client_disconnected"
+    )
+    assert disconnected.run_id == run_id
 
 
 def test_stream_all_preserves_the_existing_sse_frame_shape(
@@ -308,6 +389,7 @@ def test_stream_sends_comment_heartbeats_while_a_trial_is_running(
 def test_stream_error_is_terminal_and_is_not_followed_by_done(
     optimization_description: dict,
     stream_name: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     model = FailingModel(
         optimization_description, PetrinautClientError("transport failed")
@@ -327,7 +409,8 @@ def test_stream_error_is_terminal_and_is_not_followed_by_done(
             )
         ]
 
-    frames = asyncio.run(collect())
+    with caplog.at_level(logging.WARNING, logger="pn_optimize"):
+        frames = asyncio.run(collect())
     status = request.app.state.statuses.get(run_id)
 
     assert any(
@@ -341,6 +424,14 @@ def test_stream_error_is_terminal_and_is_not_followed_by_done(
     assert status.phase is Phase.error
     assert model.closed is True
     assert model.close_calls == [False]
+    failure = next(
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "study_failed"
+    )
+    assert failure.run_id == run_id
+    assert "transport failed" not in failure.getMessage()
+    assert not hasattr(failure, "detail")
 
 
 def test_disconnect_closes_cli_before_a_bounded_worker_join(
